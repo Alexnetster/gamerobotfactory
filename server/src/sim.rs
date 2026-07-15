@@ -93,8 +93,8 @@ pub fn tick(state: &SimState) -> SimState {
     let new_robots: Vec<Robot> = state
         .robots
         .iter()
-        .zip(planned.into_iter())
-        .zip(resolved_positions.into_iter())
+        .zip(planned)
+        .zip(resolved_positions)
         .map(|((original, mut robot), final_pos)| {
             let lost_tiebreak = final_pos != robot.pos;
             robot.pos = final_pos;
