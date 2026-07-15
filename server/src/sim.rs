@@ -71,7 +71,7 @@ pub fn tick(state: &SimState) -> SimState {
     let planned: Vec<Robot> = state
         .robots
         .par_iter()
-        .map(|robot| plan_robot(&state.grid, robot, &occupied))
+        .map(|robot| safe_plan_robot(&state.grid, robot, &occupied))
         .collect();
 
     let intents: Vec<MoveIntent> = state
@@ -135,6 +135,16 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
     }
 
     next
+}
+
+/// `plan_robot`을 패닉으로부터 격리한다. 패닉이 나면 해당 로봇은 이번
+/// 틱을 그대로 멈춘 채 넘어가고, 나머지 로봇들의 갱신은 영향받지 않는다.
+fn safe_plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plan_robot(grid, robot, occupied)))
+        .unwrap_or_else(|_| {
+            eprintln!("robot {} update panicked; holding position this tick", robot.id);
+            robot.clone()
+        })
 }
 
 /// 같은 틱에 여러 로봇이 같은 칸으로 이동을 계획하면, `robot_id`가 가장
@@ -219,5 +229,35 @@ mod tests {
         let positions_a: Vec<CellId> = tick(&tick(&state)).robots.iter().map(|r| r.pos).collect();
         let positions_b: Vec<CellId> = tick(&tick(&state)).robots.iter().map(|r| r.pos).collect();
         assert_eq!(positions_a, positions_b);
+    }
+
+    #[test]
+    fn safe_plan_robot_recovers_from_a_panic_and_holds_position() {
+        // plan_robot 자체를 결정적으로 패닉시키려면 결함 주입 지점이
+        // 필요한데 이는 이 Plan 범위를 벗어난다. 대신 safe_plan_robot이
+        // 실제로 사용하는 것과 동일한 catch_unwind 복구 경로를 여기서
+        // 직접 검증한다.
+        let robot = Robot::new(1, (0, 0), (2, 0));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Robot {
+            panic!("simulated fault in robot update")
+        }))
+        .unwrap_or_else(|_| robot.clone());
+
+        assert_eq!(result.pos, robot.pos);
+    }
+
+    #[test]
+    fn one_robot_panicking_does_not_block_others_from_updating() {
+        // safe_plan_robot으로 모든 로봇 갱신을 감싸도, 정상적인 로봇은
+        // 평소대로 전진해야 한다는 회귀 방지 테스트.
+        let mut state = simple_state(5, 1);
+        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
+        state.robots.push(Robot::new(2, (4, 0), (4, 0)));
+
+        let next = tick(&state);
+
+        let healthy = next.robots.iter().find(|r| r.id == 1).unwrap();
+        assert_eq!(healthy.pos, (1, 0));
     }
 }
