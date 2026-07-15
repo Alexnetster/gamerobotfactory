@@ -25,6 +25,16 @@ impl BodyPose {
     }
 }
 
+/// 로봇이 지금 수행 중인 팔 작업. `TriggerArmAction` 커맨드가 이 값을
+/// 바꾼다 — 실제 IK/애니메이션 계산은 클라이언트/렌더러(Plan 4)의 몫이고,
+/// 여기서는 "지금 무슨 작업 중인가"라는 사실만 기록한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Task {
+    Idle,
+    Picking,
+    Placing,
+}
+
 #[derive(Debug, Clone)]
 pub struct Robot {
     pub id: u32,
@@ -34,6 +44,7 @@ pub struct Robot {
     pub ticks_until_repath: u32,
     pub pose: BodyPose,
     pub leg_cycle_progress: f32,
+    pub task: Task,
 }
 
 impl Robot {
@@ -46,6 +57,7 @@ impl Robot {
             ticks_until_repath: 0,
             pose: BodyPose::Standing,
             leg_cycle_progress: 0.0,
+            task: Task::Idle,
         }
     }
 }
@@ -296,5 +308,11 @@ mod tests {
         let next = tick(&state);
 
         assert_eq!(next.robots[0].leg_cycle_progress, 0.0);
+    }
+
+    #[test]
+    fn new_robot_starts_idle() {
+        let robot = Robot::new(1, (0, 0), (0, 0));
+        assert_eq!(robot.task, Task::Idle);
     }
 }
