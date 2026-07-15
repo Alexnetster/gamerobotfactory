@@ -66,4 +66,33 @@ proptest! {
             }
         }
     }
+
+    #[test]
+    fn goal_is_reachable_even_when_blocked_if_a_path_exists(
+        (grid, start, goal) in arbitrary_grid_and_endpoints()
+    ) {
+        prop_assume!(grid.is_walkable(start));
+        prop_assume!(grid.is_walkable(goal));
+        prop_assume!(start != goal);
+
+        // Ground truth: is the goal reachable at all, ignoring the
+        // blocked-cell mechanism (empty blocked set)?
+        let unblocked_path = find_path(&grid, start, goal, &HashSet::new());
+        prop_assume!(unblocked_path.is_some());
+
+        // Now block the goal itself (simulating "another robot currently
+        // stands there") and confirm find_path still reaches it, thanks
+        // to the goal-exception (`next != goal && blocked.contains(&next)`
+        // in pathfind.rs — a path ending at a blocked goal must still be
+        // found; only non-goal blocked cells are actually avoided).
+        let mut blocked = HashSet::new();
+        blocked.insert(goal);
+        let path_with_goal_blocked = find_path(&grid, start, goal, &blocked);
+
+        prop_assert!(
+            path_with_goal_blocked.is_some(),
+            "goal exception should let the path still reach a blocked goal"
+        );
+        prop_assert_eq!(path_with_goal_blocked.unwrap().last().copied(), Some(goal));
+    }
 }
