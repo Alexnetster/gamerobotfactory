@@ -1,5 +1,4 @@
 use sim_core::sim::{Robot, SimState, Task};
-use sim_core::grid::CellId;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Conveyor {
@@ -49,10 +48,15 @@ impl GameState {
             self.sim.robots.push(Robot::new(id, spawn_at, spawn_at));
         }
         while self.sim.robots.len() > target {
-            self.sim.robots.pop();
-            // 로봇을 뒤에서부터 push했으므로 pop이 "가장 최근에 추가된
-            // (통상 가장 큰 id) 로봇 제거"와 대체로 일치한다. 엄밀한
-            // "가장 큰 id 제거"가 필요하면 정렬 후 제거로 바꾼다.
+            if let Some((index, _)) = self
+                .sim
+                .robots
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, r)| r.id)
+            {
+                self.sim.robots.remove(index);
+            }
         }
         if let Some(selected) = self.selected_robot {
             if !self.sim.robots.iter().any(|r| r.id == selected) {
@@ -125,6 +129,20 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(ids.len(), unique.len(), "no robot id should be reused: {ids:?}");
+    }
+
+    #[test]
+    fn set_robot_count_removes_highest_id_even_out_of_vec_order() {
+        let mut state = empty_state();
+        state.sim.robots.push(Robot::new(5, (0, 0), (0, 0)));
+        state.sim.robots.push(Robot::new(2, (0, 0), (0, 0)));
+        // Vec order is [5, 2] — deliberately NOT sorted by id, to prove
+        // removal is keyed on id value, not Vec position.
+
+        state.set_robot_count(1);
+
+        let remaining_ids: Vec<u32> = state.sim.robots.iter().map(|r| r.id).collect();
+        assert_eq!(remaining_ids, vec![2], "the highest-id robot (5) should be removed, not the last Vec element");
     }
 
     #[test]
