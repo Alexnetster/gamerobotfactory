@@ -18,6 +18,13 @@ pub async fn ws_route(
 }
 
 async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: Broadcaster) {
+    // 구독을 스냅샷 전송보다 먼저 시작한다 — 스냅샷 전송은 소켓 I/O라
+    // await 지점에서 양보(yield)할 수 있고, 그 사이에 틱 루프가
+    // 브로드캐스트를 하나 흘리면 그 델타는 이 커넥션에 영원히 유실된다
+    // (틱 루프의 `last_snapshot`은 클라이언트별이 아니라 전역 공유
+    // 기준선이므로, 한 번 놓친 변경은 다시 오지 않는다).
+    let mut updates = broadcaster.subscribe();
+
     {
         let snapshot = {
             let guard = state.lock().await;
@@ -27,8 +34,6 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: B
             return;
         }
     }
-
-    let mut updates = broadcaster.subscribe();
 
     loop {
         tokio::select! {
@@ -62,8 +67,8 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: B
                     // NOTE: this collapses tokio::sync::broadcast::error::RecvError::Lagged
                     // (transient buffer overrun) and ::Closed (channel gone) into the same
                     // "disconnect" behavior. A lagged client should ideally resync with a
-                    // fresh to_snapshot() instead of being dropped — deferred to Task 9,
-                    // since reconnect/resync semantics are being designed there anyway.
+                    // fresh to_snapshot() instead of being dropped — deferred to a future
+                    // plan, since reconnect/resync semantics need real design work there.
                 }
             }
         }

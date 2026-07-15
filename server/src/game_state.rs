@@ -33,6 +33,11 @@ pub enum CommandError {
     RobotNotFound(u32),
 }
 
+/// 설계문서의 성능 목표(20~50대)를 넉넉히 웃도는 상한. 이보다 큰 값이
+/// 오면 거부하지 않고 이 값으로 잘라서 받아들인다 — 클라이언트 실수나
+/// 악의적 입력으로 전역 락을 잡은 채 무한 할당 루프에 빠지는 것을 막는다.
+pub const MAX_ROBOT_COUNT: usize = 200;
+
 impl GameState {
     pub fn new(sim: SimState) -> Self {
         let next_robot_id = sim.robots.iter().map(|r| r.id).max().map_or(0, |max| max + 1);
@@ -43,10 +48,12 @@ impl GameState {
         self.conveyor.running = !self.conveyor.running;
     }
 
-    /// 로봇 대수를 정확히 `target`대로 맞춘다. 늘려야 하면 그리드 원점
-    /// 근처의 빈 칸에 새 로봇을 스폰하고(자기 자신을 목표로 삼아 제자리
-    /// 대기), 줄여야 하면 ID가 가장 큰 로봇부터 제거한다.
+    /// 로봇 대수를 정확히 `target`대로 맞춘다(단 `MAX_ROBOT_COUNT`로
+    /// 클램프). 늘려야 하면 그리드 원점 근처의 빈 칸에 새 로봇을
+    /// 스폰하고(자기 자신을 목표로 삼아 제자리 대기), 줄여야 하면 ID가
+    /// 가장 큰 로봇부터 제거한다.
     pub fn set_robot_count(&mut self, target: usize) {
+        let target = target.min(MAX_ROBOT_COUNT);
         while self.sim.robots.len() < target {
             let id = self.next_robot_id;
             self.next_robot_id += 1;
@@ -122,6 +129,13 @@ mod tests {
         assert_eq!(state.sim.robots.len(), 3);
         state.set_robot_count(1);
         assert_eq!(state.sim.robots.len(), 1);
+    }
+
+    #[test]
+    fn set_robot_count_clamps_to_max() {
+        let mut state = empty_state();
+        state.set_robot_count(usize::MAX);
+        assert_eq!(state.sim.robots.len(), MAX_ROBOT_COUNT);
     }
 
     #[test]

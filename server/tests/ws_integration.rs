@@ -69,20 +69,24 @@ async fn connects_and_receives_initial_snapshot_then_reacts_to_commands() {
     //    틱 주기가 50ms이므로 몇 번의 메시지 안에는 반영되어야 한다.
     //    실제 JSON을 파싱해 `changed_robots` 배열 길이를 확인한다(부분
     //    문자열 매칭보다 정확하고, `removed_robot_ids` 같은 다른 키의
-    //    이름에 우연히 걸릴 여지가 없다).
-    let mut saw_two_robots = false;
-    for _ in 0..20 {
-        let Some(Ok(Message::Text(text))) = read.next().await else { break };
-        let Ok(json) = serde_json::from_str::<Value>(&text) else { continue };
-        if json["kind"] == "Delta" {
-            if let Some(changed) = json["changed_robots"].as_array() {
-                if changed.len() >= 2 {
-                    saw_two_robots = true;
-                    break;
+    //    이름에 우연히 걸릴 여지가 없다). 전체 폴링 루프를 데드라인으로
+    //    감싸서, 델타 브로드캐스트가 회귀해도 무한정 멈춰있는 대신
+    //    빠르게 실패하도록 한다.
+    let saw_two_robots = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let Some(Ok(Message::Text(text))) = read.next().await else { return false };
+            let Ok(json) = serde_json::from_str::<Value>(&text) else { continue };
+            if json["kind"] == "Delta" {
+                if let Some(changed) = json["changed_robots"].as_array() {
+                    if changed.len() >= 2 {
+                        return true;
+                    }
                 }
             }
         }
-    }
+    })
+    .await
+    .unwrap_or(false);
     assert!(saw_two_robots, "expected a delta message reflecting 2 robots after SetRobotCount");
 }
 

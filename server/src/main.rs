@@ -92,7 +92,7 @@ async fn main() {
     let state = initial_state();
     let (broadcaster, _rx) = tokio::sync::broadcast::channel::<protocol::ServerMessage>(32);
     // 32 messages ≈ 1.6s of buffer at the 20Hz tick rate. Not load-tested;
-    // revisit alongside Task 9's reconnect/resync work if lagged
+    // revisit alongside a future plan's reconnect/resync work if lagged
     // disconnects turn out to be a real problem in practice.
 
     spawn_tick_loop(state.clone(), broadcaster.clone());
