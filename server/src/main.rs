@@ -30,7 +30,12 @@ const TICK_INTERVAL: Duration = Duration::from_millis(50); // 20Hz
 
 /// `sim_core::sim::tick`을 패닉으로부터 격리한다. 패닉이 나면 이번 틱은
 /// 건너뛰고(시뮬레이션 상태는 직전 틱 그대로 유지) 서버 프로세스와 다른
-/// 연결은 영향받지 않는다.
+/// 연결은 영향받지 않는다. `SimState`(Arc<Grid> + Vec<Robot>, 둘 다 내부
+/// 가변성 없음)는 현재 이 가정을 안전하게 만족하지만, 나중에 여기 어딘가에
+/// 내부 가변성(Cell/RefCell/Mutex 등)이 들어오면 이 안전성 논리를 다시
+/// 검토해야 한다 — `sim_core::sim`의 `safe_call` 주석과 같은 이유.
+/// 의존: 이 크레이트가 `panic = "abort"` 프로파일을 쓰지 않는다는 것 —
+/// 그 경우 `catch_unwind`는 컴파일 경고 없이 조용히 무력화된다.
 fn safe_tick(sim: &SimState) -> Option<SimState> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(sim))) {
         Ok(next) => Some(next),
