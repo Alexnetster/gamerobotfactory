@@ -20,22 +20,29 @@ fn diagonal_offset(leg: LegId) -> f32 {
     }
 }
 
+/// 스윙 구간이 차지하는 주기 비율. 나머지(60%)는 스탠스.
+const SWING_DUTY_FACTOR: f32 = 0.4;
+
+fn local_cycle_position(leg: LegId, cycle_progress: f32) -> f32 {
+    (cycle_progress + diagonal_offset(leg)).rem_euclid(1.0)
+}
+
 /// 트롯 걸음: 대각선 다리 쌍(앞왼쪽+뒤오른쪽, 앞오른쪽+뒤왼쪽)이 반 주기
 /// 어긋나 함께 움직인다. `cycle_progress`는 [0.0, 1.0) 범위이며 로봇이
 /// 이동 중일 때만 전진한다(정지 중엔 고정). 듀티 팩터를 스윙 40% /
 /// 스탠스 60%로 둬서 항상 최소 한 쌍은 접지 상태를 유지한다 — 이게
 /// 없으면 발이 미끄러지듯 보인다.
 pub fn leg_phase(leg: LegId, cycle_progress: f32) -> LegPhase {
-    let local = (cycle_progress + diagonal_offset(leg)).rem_euclid(1.0);
-    if local < 0.4 { LegPhase::Swing } else { LegPhase::Stance }
+    let local = local_cycle_position(leg, cycle_progress);
+    if local < SWING_DUTY_FACTOR { LegPhase::Swing } else { LegPhase::Stance }
 }
 
 /// 렌더링용 발 들림 높이. 접지 중엔 0.0, 스윙 구간 중간에 `lift`만큼
 /// 올라갔다가 착지 직전 다시 0.0으로 돌아온다.
 pub fn foot_lift(leg: LegId, cycle_progress: f32, lift: f32) -> f32 {
-    let local = (cycle_progress + diagonal_offset(leg)).rem_euclid(1.0);
-    if local < 0.4 {
-        let swing_progress = local / 0.4;
+    let local = local_cycle_position(leg, cycle_progress);
+    if local < SWING_DUTY_FACTOR {
+        let swing_progress = local / SWING_DUTY_FACTOR;
         lift * (swing_progress * std::f32::consts::PI).sin()
     } else {
         0.0
