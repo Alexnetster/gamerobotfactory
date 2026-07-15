@@ -23,17 +23,27 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
         }
     }
 
-    while let Some(Ok(msg)) = socket.recv().await {
-        if let Message::Text(text) = msg {
-            match serde_json::from_str::<ClientCommand>(&text) {
-                Ok(command) => {
-                    let mut guard = state.lock().await;
-                    apply_command(&mut guard, command);
-                }
-                Err(err) => {
-                    eprintln!("invalid client command, ignoring: {err}");
+    loop {
+        match socket.recv().await {
+            Some(Ok(Message::Text(text))) => {
+                match serde_json::from_str::<ClientCommand>(&text) {
+                    Ok(command) => {
+                        let mut guard = state.lock().await;
+                        apply_command(&mut guard, command);
+                    }
+                    Err(err) => {
+                        eprintln!("invalid client command, ignoring: {err}");
+                    }
                 }
             }
+            Some(Ok(_)) => {
+                // non-text WS frames (binary/ping/pong/close) — nothing to do
+            }
+            Some(Err(err)) => {
+                eprintln!("websocket error, closing connection: {err}");
+                break;
+            }
+            None => break,
         }
     }
 }
