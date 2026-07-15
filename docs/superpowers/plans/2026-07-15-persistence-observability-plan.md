@@ -572,6 +572,12 @@ pub struct Metrics {
     pub ticks_total: IntCounter,
     pub connected_clients: IntGauge,
     pub robot_count: IntGauge,
+    /// `safe_tick`(Task 2)이 패닉을 잡아낸 횟수. 이게 없으면 틱 루프가
+    /// 매번 패닉해서 시뮬레이션이 조용히 멈춰도(서버 프로세스 자체는
+    /// 살아있으니 `/health`는 여전히 "ok"를 반환) 밖에서 알아챌 방법이
+    /// 없다 — Task 2 코드 리뷰에서 지적된 "조용한 멈춤" 관측 공백을
+    /// 메우는 지표.
+    pub tick_panics_total: IntCounter,
 }
 
 impl Metrics {
@@ -595,8 +601,14 @@ impl Metrics {
             registry
         )
         .expect("metric registration is infallible for a fresh registry");
+        let tick_panics_total = register_int_counter_with_registry!(
+            "gamerobotfactory_tick_panics_total",
+            "Total number of ticks where sim_core::sim::tick panicked and was skipped",
+            registry
+        )
+        .expect("metric registration is infallible for a fresh registry");
 
-        Metrics { registry, ticks_total, connected_clients, robot_count }
+        Metrics { registry, ticks_total, connected_clients, robot_count, tick_panics_total }
     }
 
     pub fn encode(&self) -> (String, Vec<u8>) {
@@ -630,6 +642,7 @@ mod tests {
         assert!(text.contains("gamerobotfactory_ticks_total"));
         assert!(text.contains("gamerobotfactory_connected_clients"));
         assert!(text.contains("gamerobotfactory_robot_count"));
+        assert!(text.contains("gamerobotfactory_tick_panics_total"));
     }
 
     #[test]
@@ -797,8 +810,9 @@ fn spawn_tick_loop(
 
             let (message, next_snapshot, should_persist, stats_row) = {
                 let mut guard = state.lock().await;
-                if let Some(next_sim) = safe_tick(&guard.sim) {
-                    guard.sim = next_sim;
+                match safe_tick(&guard.sim) {
+                    Some(next_sim) => guard.sim = next_sim,
+                    None => metrics.tick_panics_total.inc(),
                 }
 
                 let mut total_production_value = 0.0_f32;
