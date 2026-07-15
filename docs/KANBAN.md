@@ -21,14 +21,13 @@
 - **Task 7** — WebSocket 핸들러 (초기 스냅샷 + 커맨드 적용) (`2e25d1b`, 후속 로깅 수정 `e9870c8`) — 실제 WS 클라이언트로 구현자·리뷰어 각자 독립 검증됨
 - **Task 8** — 20Hz 틱 루프 + 델타 브로드캐스트 (`5afecf3`, 문서 보강 `d0fe0c9`) — 실제 클라이언트로 주기적 브로드캐스트 확인됨
 - **Task 9** — 세션/재접속 유예시간 순수 로직 (`492bd57`, 수정 `0609a39`) — 의도적으로 `ws.rs`에 미배선(스트레치 목표)
+- **Task 10** — 통합테스트 (`acce46b`, 실제 서버 바이너리 + `tokio-tungstenite` 클라이언트) + 최종 리뷰 수정 (`f75d3fe`: `SetRobotCount` 상한 200으로 클램프, `subscribe()`를 스냅샷 전송보다 먼저 하도록 재정렬해 레이스 제거, 통합테스트 1번에 5초 타임아웃 추가) — 8회 반복 연결→커맨드→델타 사이클로 실제 재확인됨
+
+**Plan 2 전체 완료.** 67개 테스트 통과, clippy 경고 0개.
 
 ## In Progress
 
-- **Plan 2 Task 10** — 통합테스트(`acce46b`, 실제 서버 바이너리 + `tokio-tungstenite` 클라이언트)는 작성 완료됐으나, 최종 통합 리뷰에서 나온 수정 반영 중:
-  - **Critical**: `SetRobotCount`에 상한 없음 — 큰 값 전송 시 전역 락 잡은 채 무한 할당 루프(DoS) 가능. 수정 진행 중.
-  - **Important**: `ws.rs::handle_socket`에서 초기 스냅샷 전송이 `broadcaster.subscribe()`보다 먼저 일어나 그 사이 브로드캐스트를 놓칠 수 있는 레이스. 수정 진행 중.
-  - **Important**: 통합테스트 1번이 전체 타임아웃 없이 폴링해서, 회귀 시 무한 대기 가능. 수정 진행 중.
-  - 완료되면 이 항목들을 Done으로 옮기고 커밋 SHA를 남긴다.
+(없음)
 
 ## Backlog
 
@@ -46,8 +45,8 @@
 - Plan 1/2 계획 문서의 태스크 체크박스(`- [ ]`)가 실제 완료 상태를 반영하지 못하고 있음 — 기능 영향 없는 문서 위생 이슈.
 - `README.md`가 저장소에 아직 없음 — 설계문서의 "발표/데모 전략"이 v1부터 요구하는 항목인데 계속 미룸.
 
-## 현재 건강도 스냅샷 (Task 10 수정 반영 전 기준)
+## 현재 건강도 스냅샷
 
-- `cargo test --manifest-path server/Cargo.toml`: 66/66 통과
+- `cargo test --manifest-path server/Cargo.toml`: 67/67 통과
 - `cargo clippy --all-targets`: 경고 0개
 - `vitest`: 해당 없음 (`client/` 없음)
