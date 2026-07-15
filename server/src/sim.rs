@@ -140,7 +140,19 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
 /// `plan_robot`을 패닉으로부터 격리한다. 패닉이 나면 해당 로봇은 이번
 /// 틱을 그대로 멈춘 채 넘어가고, 나머지 로봇들의 갱신은 영향받지 않는다.
 fn safe_plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plan_robot(grid, robot, occupied)))
+    safe_call(robot, || plan_robot(grid, robot, occupied))
+}
+
+/// Runs `f` (a robot's per-tick update) isolated from panics: if it
+/// unwinds, the robot holds its last position instead of taking down
+/// the whole tick. Depends on the crate never setting `panic = "abort"`
+/// in a Cargo profile — under `panic = "abort"` this becomes a no-op
+/// and a single robot's fault would abort the whole process instead of
+/// being isolated, with no compile-time warning. `AssertUnwindSafe` is
+/// currently a no-op assertion (nothing reachable here has interior
+/// mutability yet) but must be revisited if that changes.
+fn safe_call(robot: &Robot, f: impl FnOnce() -> Robot) -> Robot {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
         .unwrap_or_else(|_| {
             eprintln!("robot {} update panicked; holding position this tick", robot.id);
             robot.clone()
@@ -232,17 +244,10 @@ mod tests {
     }
 
     #[test]
-    fn safe_plan_robot_recovers_from_a_panic_and_holds_position() {
-        // plan_robot 자체를 결정적으로 패닉시키려면 결함 주입 지점이
-        // 필요한데 이는 이 Plan 범위를 벗어난다. 대신 safe_plan_robot이
-        // 실제로 사용하는 것과 동일한 catch_unwind 복구 경로를 여기서
-        // 직접 검증한다.
+    fn safe_call_recovers_from_a_real_panic_and_holds_position() {
         let robot = Robot::new(1, (0, 0), (2, 0));
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Robot {
-            panic!("simulated fault in robot update")
-        }))
-        .unwrap_or_else(|_| robot.clone());
+        let result = safe_call(&robot, || panic!("simulated fault in robot update"));
 
         assert_eq!(result.pos, robot.pos);
     }
