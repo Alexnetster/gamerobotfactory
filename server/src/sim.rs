@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const REPATH_INTERVAL: u32 = 10;
+const LEG_CYCLE_SPEED: f32 = 0.1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BodyPose {
@@ -32,6 +33,7 @@ pub struct Robot {
     pub path: Vec<CellId>,
     pub ticks_until_repath: u32,
     pub pose: BodyPose,
+    pub leg_cycle_progress: f32,
 }
 
 impl Robot {
@@ -43,6 +45,7 @@ impl Robot {
             path: Vec::new(),
             ticks_until_repath: 0,
             pose: BodyPose::Standing,
+            leg_cycle_progress: 0.0,
         }
     }
 }
@@ -87,10 +90,12 @@ pub fn tick(state: &SimState) -> SimState {
 
     let resolved_positions = resolve_intents(&intents);
 
-    let new_robots: Vec<Robot> = planned
-        .into_iter()
+    let new_robots: Vec<Robot> = state
+        .robots
+        .iter()
+        .zip(planned.into_iter())
         .zip(resolved_positions.into_iter())
-        .map(|(mut robot, final_pos)| {
+        .map(|((original, mut robot), final_pos)| {
             let lost_tiebreak = final_pos != robot.pos;
             robot.pos = final_pos;
             if lost_tiebreak {
@@ -98,6 +103,9 @@ pub fn tick(state: &SimState) -> SimState {
                 // 다음 기회에 새로 재계획한다 (무의미한 즉시 재시도 방지).
                 robot.path.clear();
                 robot.ticks_until_repath = 0;
+            }
+            if robot.pos != original.pos {
+                robot.leg_cycle_progress = (robot.leg_cycle_progress + LEG_CYCLE_SPEED).rem_euclid(1.0);
             }
             robot
         })
@@ -264,5 +272,25 @@ mod tests {
 
         let healthy = next.robots.iter().find(|r| r.id == 1).unwrap();
         assert_eq!(healthy.pos, (1, 0));
+    }
+
+    #[test]
+    fn leg_cycle_progress_advances_while_moving() {
+        let mut state = simple_state(5, 1);
+        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
+
+        let next = tick(&state);
+
+        assert!(next.robots[0].leg_cycle_progress > 0.0);
+    }
+
+    #[test]
+    fn leg_cycle_progress_does_not_advance_once_at_goal() {
+        let mut state = simple_state(5, 1);
+        state.robots.push(Robot::new(1, (2, 0), (2, 0)));
+
+        let next = tick(&state);
+
+        assert_eq!(next.robots[0].leg_cycle_progress, 0.0);
     }
 }
