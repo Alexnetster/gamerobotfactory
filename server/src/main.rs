@@ -1,6 +1,7 @@
 mod game_state;
 mod protocol;
 mod delta;
+mod session;
 mod ws;
 
 use axum::{routing::get, Router};
