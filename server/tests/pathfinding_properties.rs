@@ -39,4 +39,31 @@ proptest! {
             }
         }
     }
+
+    /// `find_path`는 `blocked`(다른 로봇이 현재 점유한 칸)를 장애물로 취급해
+    /// 우회해야 하지만, 목표 칸 자체는 `blocked`에 있어도 예외적으로 항상
+    /// 도달 가능해야 한다 (그 로봇이 다음 틱에 비킬 수도 있으므로). 이
+    /// 테스트는 `blocked`를 무작위로 채워, 경로 중 목표 칸을 제외한 어떤
+    /// 칸도 `blocked`에 속하지 않음을 확인한다.
+    #[test]
+    fn path_avoids_blocked_cells_except_goal(
+        ((grid, start, goal), blocked) in (
+            arbitrary_grid_and_endpoints(),
+            proptest::collection::hash_set((0..SIZE, 0..SIZE), 0..6),
+        )
+    ) {
+        prop_assume!(grid.is_walkable(start));
+        prop_assume!(grid.is_walkable(goal));
+
+        if let Some(path) = find_path(&grid, start, goal, &blocked) {
+            let last_index = path.len().saturating_sub(1);
+            for (i, cell) in path.iter().enumerate() {
+                if i == last_index {
+                    // the goal cell itself is always allowed, even if blocked
+                    continue;
+                }
+                prop_assert!(!blocked.contains(cell));
+            }
+        }
+    }
 }
