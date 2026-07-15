@@ -30,4 +30,27 @@ mod tests {
         let crouching = world_target_to_body_local(0.6, 0.5, BodyPose::Crouching);
         assert_eq!(standing.x, crouching.x);
     }
+
+    #[test]
+    fn feeds_cleanly_into_the_ik_solver_for_both_postures() {
+        use crate::ik::{forward_kinematics, solve_two_bone_ik};
+
+        let upper_len = 0.7;
+        let lower_len = 0.6;
+
+        for pose in [BodyPose::Standing, BodyPose::Crouching] {
+            let local_target = world_target_to_body_local(0.4, 0.5, pose);
+            let arm_pose = solve_two_bone_ik(upper_len, lower_len, local_target);
+            let reached = forward_kinematics(upper_len, lower_len, arm_pose);
+
+            assert!((reached.x - local_target.x).abs() < 0.01, "{pose:?}: x mismatch");
+            assert!((reached.y - local_target.y).abs() < 0.01, "{pose:?}: y mismatch");
+        }
+    }
+
+    #[test]
+    fn target_level_with_shoulder_lands_at_body_local_origin() {
+        assert_eq!(world_target_to_body_local(1.0, 0.0, BodyPose::Standing), Point2 { x: 0.0, y: 0.0 });
+        assert_eq!(world_target_to_body_local(0.5, 0.0, BodyPose::Crouching), Point2 { x: 0.0, y: 0.0 });
+    }
 }
