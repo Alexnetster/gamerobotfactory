@@ -1,3 +1,4 @@
+mod delta;
 mod game_state;
 mod protocol;
 
