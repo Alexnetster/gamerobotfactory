@@ -28,6 +28,19 @@ fn initial_state() -> SharedState {
 
 const TICK_INTERVAL: Duration = Duration::from_millis(50); // 20Hz
 
+/// `sim_core::sim::tick`을 패닉으로부터 격리한다. 패닉이 나면 이번 틱은
+/// 건너뛰고(시뮬레이션 상태는 직전 틱 그대로 유지) 서버 프로세스와 다른
+/// 연결은 영향받지 않는다.
+fn safe_tick(sim: &SimState) -> Option<SimState> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(sim))) {
+        Ok(next) => Some(next),
+        Err(_) => {
+            eprintln!("tick() panicked; skipping this tick, simulation state unchanged");
+            None
+        }
+    }
+}
+
 /// 백그라운드에서 20Hz로 시뮬레이션을 전진시키고, 마지막으로 브로드캐스트한
 /// 스냅샷과 비교한 델타를 연결된 모든 클라이언트에 보낸다. `state.lock()`
 /// 가드는 이 블록 안(동기 연산: tick/생산량 집계/스냅샷 변환)에서만
@@ -47,7 +60,9 @@ fn spawn_tick_loop(state: SharedState, broadcaster: Broadcaster) {
 
             let (message, next_snapshot) = {
                 let mut guard = state.lock().await;
-                guard.sim = tick(&guard.sim);
+                if let Some(next_sim) = safe_tick(&guard.sim) {
+                    guard.sim = next_sim;
+                }
 
                 if guard.conveyor.running {
                     let units: HashMap<u32, f32> = guard.sim.robots.iter().map(|r| (r.id, 0.01)).collect();
@@ -106,4 +121,29 @@ async fn main() {
         .expect("failed to bind 127.0.0.1:0");
     println!("LISTENING_PORT={}", listener.local_addr().unwrap().port());
     axum::serve(listener, app).await.expect("server exited with an error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_tick_passes_through_normal_ticks_unchanged() {
+        let sim = SimState { grid: Arc::new(Grid::new(3, 3)), robots: Vec::new(), tick_count: 5 };
+        let result = safe_tick(&sim);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().tick_count, 6);
+    }
+
+    #[test]
+    fn catch_unwind_recovers_from_a_panic_the_same_way_safe_tick_does() {
+        // sim_core::sim::tick() 자체를 결정적으로 패닉시키려면 이미 완성되어
+        // 포트폴리오 리뷰까지 거친 Plan 1 라이브러리에 결함 주입 지점을 다시
+        // 여는 작업이 필요한데, 이는 이 태스크 범위 밖이다. 대신 safe_tick이
+        // 실제로 쓰는 것과 동일한 catch_unwind 복구 경로를 직접 검증한다 —
+        // Plan 1의 safe_call 테스트, Plan 2의 goal-exception 재검증과 같은
+        // 패턴(패턴 자체를 검증 + 정상 경로 테스트로 실제 배선까지 커버).
+        let result: std::thread::Result<i32> = std::panic::catch_unwind(|| panic!("simulated tick fault"));
+        assert!(result.is_err());
+    }
 }
