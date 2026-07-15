@@ -28,7 +28,9 @@
 ## In Progress
 
 ### Plan 3 — 영속화 + REST API + 관측가능성 + 하드닝 (`docs/superpowers/plans/2026-07-15-persistence-observability-plan.md`)
-계획서 작성 완료(`285ca15`), 아직 태스크 착수 전. 10개 태스크: (1)세션 재접속 실배선+Lagged 리싱크, (2)틱 루프 패닉 방어(`safe_tick`), (3)SQLite 영속화, (4)`AppConfig`+`/api/config`, (5)Prometheus `/metrics`, (6)tracing 구조화 로깅, (7)전부 `main.rs`에 배선, (8)Lagged 통합테스트, (9)Resume 통합테스트, (10)REST/영속화/메트릭 통합테스트.
+계획서(`285ca15`). 10개 태스크: (1)~~세션 재접속 실배선+Lagged 리싱크~~ ✅, (2)틱 루프 패닉 방어(`safe_tick`), (3)SQLite 영속화, (4)`AppConfig`+`/api/config`, (5)Prometheus `/metrics`, (6)tracing 구조화 로깅, (7)전부 `main.rs`에 배선, (8)Lagged 통합테스트, (9)Resume 통합테스트, (10)REST/영속화/메트릭 통합테스트.
+
+- **Task 1 완료** — 세션 재접속 실배선 + Lagged 리싱크 (`7db4e37`, 문서 보강 진행 중) — 실제 WS 클라이언트로 구현자·리뷰어 각자 독립 검증됨(초기 스냅샷에 진짜 session_id, 유효/무효 Resume 각각 정확히 응답). Plan 2 종료 시 남겨뒀던 하드닝 갭 3개 중 2개(재접속 배선, Lagged 처리) 해소.
 
 ## Backlog
 
