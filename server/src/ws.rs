@@ -125,7 +125,7 @@ fn apply_command(state: &mut GameState, command: ClientCommand) {
         // handle_socket intercepts Resume before calling apply_command, so this
         // arm should be unreachable in practice; kept only to satisfy the
         // exhaustive match now that ClientCommand has a Resume variant.
-        Resume { .. } => {}
+        Resume { .. } => unreachable!("Resume is intercepted in handle_socket before reaching apply_command"),
     }
 }
 

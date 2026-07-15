@@ -15,6 +15,11 @@ pub enum ClientCommand {
     ToggleConveyor,
     SetRobotCount { count: usize },
     TriggerArmAction { robot_id: u32, task: WireTask },
+    /// 유예시간 내 재접속인지 확인만 하는 순수 검증 커맨드다. 매 연결마다
+    /// 항상 새 세션이 발급되고(핸드셰이크 시점에 이미 스냅샷과 함께
+    /// 나간다), 델타 기준선이 전역 공유이므로 `Resume`이 서버 쪽에서
+    /// 뭔가를 되살리거나 병합하는 것은 아니다 — `resumed: true/false`
+    /// 응답 외에는 클라이언트가 받는 것이 Resume을 안 보냈을 때와 동일하다.
     Resume { session_id: uuid::Uuid },
 }
 
