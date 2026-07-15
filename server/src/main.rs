@@ -1,6 +1,7 @@
 mod game_state;
 mod protocol;
 mod delta;
+mod persistence;
 mod session;
 mod ws;
 
