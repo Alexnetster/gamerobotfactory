@@ -28,10 +28,11 @@
 ## In Progress
 
 ### Plan 3 — 영속화 + REST API + 관측가능성 + 하드닝 (`docs/superpowers/plans/2026-07-15-persistence-observability-plan.md`)
-계획서(`285ca15`, 관측가능성 보강 `dd65136`). 10개 태스크: (1)~~세션 재접속 실배선+Lagged 리싱크~~ ✅, (2)~~틱 루프 패닉 방어(`safe_tick`)~~ ✅, (3)SQLite 영속화, (4)`AppConfig`+`/api/config`, (5)Prometheus `/metrics`(+`tick_panics_total`), (6)tracing 구조화 로깅, (7)전부 `main.rs`에 배선, (8)Lagged 통합테스트, (9)Resume 통합테스트, (10)REST/영속화/메트릭 통합테스트.
+계획서(`285ca15`, 관측가능성 보강 `dd65136`). 10개 태스크: (1)~~세션 재접속 실배선+Lagged 리싱크~~ ✅, (2)~~틱 루프 패닉 방어(`safe_tick`)~~ ✅, (3)~~SQLite 영속화~~ ✅, (4)`AppConfig`+`/api/config`, (5)Prometheus `/metrics`(+`tick_panics_total`), (6)tracing 구조화 로깅, (7)전부 `main.rs`에 배선, (8)Lagged 통합테스트, (9)Resume 통합테스트, (10)REST/영속화/메트릭 통합테스트.
 
 - **Task 1 완료** — 세션 재접속 실배선 + Lagged 리싱크 (`7db4e37`, 문서 보강 `fa2fb1c`) — 실제 WS 클라이언트로 구현자·리뷰어 각자 독립 검증됨(초기 스냅샷에 진짜 session_id, 유효/무효 Resume 각각 정확히 응답). Plan 2 종료 시 남겨뒀던 하드닝 갭 3개 중 2개(재접속 배선, Lagged 처리) 해소.
 - **Task 2 완료** — 틱 루프 패닉 방어 `safe_tick` (`d39b265`, 문서 보강 `10afdbe`) — Plan 2 이후 남은 하드닝 갭 3개 전부 해소. 리뷰에서 "패닉 시 조용히 멈추는 게 관측 안 됨" 지적이 나와, 아직 실행 전인 Task 5/7에 `tick_panics_total` 카운터를 미리 반영해둠(`dd65136`).
+- **Task 3 완료** — `persistence.rs` SQLite 영속화 (`9b0945b`) — `session.rs` 때와 같은 이유로 `#![allow(dead_code)]`(아직 미배선, Task 7에서 연결). 스키마 버전/마이그레이션 없음은 의도적으로 남겨둔 갭(포트폴리오 스코프에서 지금 만들 필요 없음).
 
 ## Backlog
 
@@ -44,6 +45,6 @@
 
 ## 현재 건강도 스냅샷
 
-- `cargo test --manifest-path server/Cargo.toml`: 69/69 통과
+- `cargo test --manifest-path server/Cargo.toml`: 72/72 통과
 - `cargo clippy --all-targets`: 경고 0개
 - `vitest`: 해당 없음 (`client/` 없음)
