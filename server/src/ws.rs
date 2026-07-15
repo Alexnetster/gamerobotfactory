@@ -7,12 +7,17 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub type SharedState = Arc<Mutex<GameState>>;
+pub type Broadcaster = tokio::sync::broadcast::Sender<crate::protocol::ServerMessage>;
 
-pub async fn ws_route(ws: WebSocketUpgrade, State(state): State<SharedState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+pub async fn ws_route(
+    ws: WebSocketUpgrade,
+    State(state): State<SharedState>,
+    axum::extract::Extension(broadcaster): axum::extract::Extension<Broadcaster>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, broadcaster))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: SharedState) {
+async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: Broadcaster) {
     {
         let snapshot = {
             let guard = state.lock().await;
@@ -23,27 +28,39 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
         }
     }
 
+    let mut updates = broadcaster.subscribe();
+
     loop {
-        match socket.recv().await {
-            Some(Ok(Message::Text(text))) => {
-                match serde_json::from_str::<ClientCommand>(&text) {
-                    Ok(command) => {
-                        let mut guard = state.lock().await;
-                        apply_command(&mut guard, command);
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<ClientCommand>(&text) {
+                            Ok(command) => {
+                                let mut guard = state.lock().await;
+                                apply_command(&mut guard, command);
+                            }
+                            Err(err) => eprintln!("invalid client command, ignoring: {err}"),
+                        }
                     }
-                    Err(err) => {
-                        eprintln!("invalid client command, ignoring: {err}");
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => {
+                        eprintln!("websocket error, closing connection: {err}");
+                        break;
                     }
+                    None => break,
                 }
             }
-            Some(Ok(_)) => {
-                // non-text WS frames (binary/ping/pong/close) — nothing to do
+            update = updates.recv() => {
+                match update {
+                    Ok(message) => {
+                        if send_message(&mut socket, &message).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
-            Some(Err(err)) => {
-                eprintln!("websocket error, closing connection: {err}");
-                break;
-            }
-            None => break,
         }
     }
 }

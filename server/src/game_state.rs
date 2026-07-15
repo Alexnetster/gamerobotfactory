@@ -11,6 +11,12 @@ impl Conveyor {
     }
 }
 
+impl Default for Conveyor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 시뮬레이션 진실(`SimState`)에 세션/오케스트레이션 상태(컨베이어,
 /// 선택된 로봇)를 얹은 것. `selected_robot`은 "지금 이 오퍼레이터가
 /// 어느 로봇을 보고 있는가"라는 UI 개념이라 시뮬레이션 진실이 아니므로
