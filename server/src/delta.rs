@@ -95,6 +95,22 @@ mod tests {
     }
 
     #[test]
+    fn new_robot_is_included_in_delta() {
+        let prev = vec![robot_view(1, 0)];
+        let curr = vec![robot_view(1, 0), robot_view(2, 5)];
+
+        let msg = compute_delta(ConveyorView { running: true }, &prev, 1, ConveyorView { running: true }, &curr);
+
+        match msg {
+            ServerMessage::Delta { changed_robots, removed_robot_ids, .. } => {
+                assert_eq!(changed_robots, vec![robot_view(2, 5)], "only the newly-added robot should appear");
+                assert!(removed_robot_ids.is_empty());
+            }
+            _ => panic!("expected Delta"),
+        }
+    }
+
+    #[test]
     fn conveyor_change_is_reported_only_when_it_changed() {
         let msg = compute_delta(ConveyorView { running: true }, &[], 1, ConveyorView { running: false }, &[]);
         match msg {
