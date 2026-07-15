@@ -7,7 +7,7 @@ pub const PROTOCOL_VERSION: u8 = 1;
 
 /// 클라이언트 → 서버 커맨드. `#[serde(tag = "type")]`로 JSON에서
 /// `{"type": "ToggleConveyor"}` 같은 식으로 태그가 붙는다.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ClientCommand {
     SelectRobot { robot_id: u32 },
@@ -59,10 +59,22 @@ impl From<BodyPose> for WirePose {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireCellId {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl From<CellId> for WireCellId {
+    fn from(pos: CellId) -> WireCellId {
+        WireCellId { x: pos.0, y: pos.1 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RobotView {
     pub id: u32,
-    pub pos: CellId,
+    pub pos: WireCellId,
     pub pose: WirePose,
     pub leg_cycle_progress: f32,
     pub task: WireTask,
@@ -72,7 +84,7 @@ impl From<&Robot> for RobotView {
     fn from(r: &Robot) -> RobotView {
         RobotView {
             id: r.id,
-            pos: r.pos,
+            pos: r.pos.into(),
             pose: r.pose.into(),
             leg_cycle_progress: r.leg_cycle_progress,
             task: r.task.into(),
@@ -127,6 +139,14 @@ mod tests {
         let json = r#"{"type":"TriggerArmAction","robot_id":3,"task":"Picking"}"#;
         let cmd: ClientCommand = serde_json::from_str(json).unwrap();
         assert_eq!(cmd, ClientCommand::TriggerArmAction { robot_id: 3, task: WireTask::Picking });
+    }
+
+    #[test]
+    fn client_command_round_trips_through_json() {
+        let cmd = ClientCommand::TriggerArmAction { robot_id: 3, task: WireTask::Placing };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: ClientCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, back);
     }
 
     #[test]
