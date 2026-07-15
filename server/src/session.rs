@@ -1,3 +1,11 @@
+//! Session/reconnect-grace-period tracking. Deliberately not wired into
+//! `ws.rs` yet — actual WS reconnect wiring is an explicit stretch goal
+//! beyond this plan's scope (see the design doc's WS 프로토콜 section).
+//! This module is complete and tested on its own; the dead-code lint is
+//! suppressed here rather than forcing premature wiring just to satisfy
+//! clippy.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -22,6 +30,7 @@ impl SessionRegistry {
     }
 
     pub fn start_session(&mut self, now: Instant) -> Uuid {
+        self.evict_expired(now);
         let id = Uuid::new_v4();
         self.sessions.insert(id, SessionEntry { last_seen: now });
         id
@@ -37,13 +46,13 @@ impl SessionRegistry {
     /// 이어갈 수 있다는 뜻), 만료됐거나 존재한 적 없으면 `false`.
     pub fn is_within_grace_period(&self, id: Uuid, now: Instant) -> bool {
         match self.sessions.get(&id) {
-            Some(entry) => now.duration_since(entry.last_seen) < RECONNECT_GRACE_PERIOD,
+            Some(entry) => now.saturating_duration_since(entry.last_seen) < RECONNECT_GRACE_PERIOD,
             None => false,
         }
     }
 
     pub fn evict_expired(&mut self, now: Instant) {
-        self.sessions.retain(|_, entry| now.duration_since(entry.last_seen) < RECONNECT_GRACE_PERIOD);
+        self.sessions.retain(|_, entry| now.saturating_duration_since(entry.last_seen) < RECONNECT_GRACE_PERIOD);
     }
 }
 
@@ -98,5 +107,17 @@ mod tests {
 
         assert!(registry.is_within_grace_period(fresh, now));
         assert!(!registry.is_within_grace_period(stale, now));
+    }
+
+    #[test]
+    fn start_session_opportunistically_evicts_stale_entries() {
+        let mut registry = SessionRegistry::new();
+        let now = Instant::now();
+        let stale = registry.start_session(now - RECONNECT_GRACE_PERIOD - Duration::from_secs(1));
+
+        let fresh = registry.start_session(now);
+
+        assert!(!registry.is_within_grace_period(stale, now));
+        assert!(registry.is_within_grace_period(fresh, now));
     }
 }
