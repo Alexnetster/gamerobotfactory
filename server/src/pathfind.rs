@@ -26,7 +26,7 @@ fn heuristic(a: CellId, b: CellId) -> i32 {
 
 /// 시작점에서 목표점까지 최단 경로를 찾는다. 벽과 `blocked`(다른 로봇이
 /// 현재 점유한 칸)을 장애물로 취급하되, 목표 칸 자체가 `blocked`에 들어
-///있어도 그쪽으로 향하는 시도는 막지 않는다 — 그 로봇이 다음 틱에 비킬
+/// 있어도 그쪽으로 향하는 시도는 막지 않는다 — 그 로봇이 다음 틱에 비킬
 /// 수도 있기 때문이며, 실제 동시 이동 충돌은 `sim` 모듈의 타이브레이크가
 /// 처리한다. 반환값은 `start`를 제외하고 `goal`을 포함하는 경로. 도달
 /// 불가능하면 `None`.
@@ -132,5 +132,14 @@ mod tests {
         blocked.insert((1, 0));
         let path = find_path(&grid, (0, 0), (2, 0), &blocked);
         assert_eq!(path, None);
+    }
+
+    #[test]
+    fn goal_cell_is_reachable_even_if_blocked() {
+        let grid = Grid::new(3, 1);
+        let mut blocked = HashSet::new();
+        blocked.insert((2, 0)); // the goal itself is occupied
+        let path = find_path(&grid, (0, 0), (2, 0), &blocked).unwrap();
+        assert_eq!(path, vec![(1, 0), (2, 0)]);
     }
 }
