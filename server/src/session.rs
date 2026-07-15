@@ -1,10 +1,7 @@
-//! Session/reconnect-grace-period tracking. Deliberately not wired into
-//! `ws.rs` yet — actual WS reconnect wiring is an explicit stretch goal
-//! beyond this plan's scope (see the design doc's WS 프로토콜 section).
-//! This module is complete and tested on its own; the dead-code lint is
-//! suppressed here rather than forcing premature wiring just to satisfy
-//! clippy.
-#![allow(dead_code)]
+//! Session/reconnect-grace-period tracking, wired into `ws.rs`'s WebSocket
+//! handler: every connection gets a session id up front (carried in the
+//! initial `Snapshot`), and a `Resume` command lets a reconnecting client
+//! check whether it's still within the grace period.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

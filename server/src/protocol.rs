@@ -15,6 +15,7 @@ pub enum ClientCommand {
     ToggleConveyor,
     SetRobotCount { count: usize },
     TriggerArmAction { robot_id: u32, task: WireTask },
+    Resume { session_id: uuid::Uuid },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,14 +110,16 @@ impl From<Conveyor> for ConveyorView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum ServerMessage {
-    Snapshot { v: u8, tick: u64, conveyor: ConveyorView, robots: Vec<RobotView> },
+    Snapshot { v: u8, tick: u64, session_id: uuid::Uuid, conveyor: ConveyorView, robots: Vec<RobotView> },
     Delta { v: u8, tick: u64, conveyor: Option<ConveyorView>, changed_robots: Vec<RobotView>, removed_robot_ids: Vec<u32> },
+    ResumeAck { v: u8, session_id: uuid::Uuid, resumed: bool },
 }
 
-pub fn to_snapshot(state: &GameState) -> ServerMessage {
+pub fn to_snapshot(state: &GameState, session_id: uuid::Uuid) -> ServerMessage {
     ServerMessage::Snapshot {
         v: PROTOCOL_VERSION,
         tick: state.sim.tick_count,
+        session_id,
         conveyor: state.conveyor.into(),
         robots: state.sim.robots.iter().map(RobotView::from).collect(),
     }
@@ -154,6 +157,7 @@ mod tests {
         let msg = ServerMessage::Snapshot {
             v: 1,
             tick: 42,
+            session_id: uuid::Uuid::nil(),
             conveyor: ConveyorView { running: true },
             robots: vec![],
         };
@@ -173,9 +177,9 @@ mod tests {
         state.set_robot_count(2);
         state.toggle_conveyor();
 
-        let snapshot = to_snapshot(&state);
+        let snapshot = to_snapshot(&state, uuid::Uuid::nil());
         match snapshot {
-            ServerMessage::Snapshot { v, tick, conveyor, robots } => {
+            ServerMessage::Snapshot { v, tick, conveyor, robots, .. } => {
                 assert_eq!(v, PROTOCOL_VERSION);
                 assert_eq!(tick, 5);
                 assert!(!conveyor.running);

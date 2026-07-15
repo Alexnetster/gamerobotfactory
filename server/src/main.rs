@@ -39,7 +39,7 @@ fn spawn_tick_loop(state: SharedState, broadcaster: Broadcaster) {
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         let mut last_snapshot = {
             let guard = state.lock().await;
-            to_snapshot(&guard)
+            to_snapshot(&guard, uuid::Uuid::nil())
         };
 
         loop {
@@ -58,7 +58,7 @@ fn spawn_tick_loop(state: SharedState, broadcaster: Broadcaster) {
                     // 것만 지금은 증명해둔다.
                 }
 
-                let current_snapshot = to_snapshot(&guard);
+                let current_snapshot = to_snapshot(&guard, uuid::Uuid::nil());
                 let delta = match (&last_snapshot, &current_snapshot) {
                     (
                         protocol::ServerMessage::Snapshot { conveyor: prev_conveyor, robots: prev_robots, .. },
@@ -75,12 +75,13 @@ fn spawn_tick_loop(state: SharedState, broadcaster: Broadcaster) {
     });
 }
 
-pub fn build_app(state: SharedState, broadcaster: Broadcaster) -> Router {
+pub fn build_app(state: SharedState, broadcaster: Broadcaster, sessions: ws::SessionHandle) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ws", get(ws_route))
         .with_state(state)
         .layer(axum::extract::Extension(broadcaster))
+        .layer(axum::extract::Extension(sessions))
 }
 
 /// 포트를 고정하지 않고 OS가 빈 포트를 골라주게 한다(`:0`) — 통합테스트
@@ -94,10 +95,11 @@ async fn main() {
     // 32 messages ≈ 1.6s of buffer at the 20Hz tick rate. Not load-tested;
     // revisit alongside a future plan's reconnect/resync work if lagged
     // disconnects turn out to be a real problem in practice.
+    let sessions: ws::SessionHandle = Arc::new(Mutex::new(session::SessionRegistry::new()));
 
     spawn_tick_loop(state.clone(), broadcaster.clone());
 
-    let app = build_app(state, broadcaster);
+    let app = build_app(state, broadcaster, sessions);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
