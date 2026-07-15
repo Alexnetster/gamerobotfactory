@@ -2,6 +2,7 @@ use crate::grid::{CellId, Grid};
 use crate::pathfind::find_path;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const REPATH_INTERVAL: u32 = 10;
 
@@ -48,7 +49,7 @@ impl Robot {
 
 #[derive(Debug, Clone)]
 pub struct SimState {
-    pub grid: Grid,
+    pub grid: Arc<Grid>,
     pub robots: Vec<Robot>,
     pub tick_count: u64,
 }
@@ -122,7 +123,10 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
     }
 
     if let Some(&next_cell) = next.path.first() {
-        if !occupied.contains(&next_cell) || next_cell == robot.pos {
+        // `find_path`는 `start`를 제외한 경로를 반환하므로 `next_cell`이
+        // `robot.pos`(현재 칸)와 같아지는 경우는 없다 — 그래서 여기서는
+        // `occupied` 검사만으로 충분하다.
+        if !occupied.contains(&next_cell) {
             next.pos = next_cell;
             next.path.remove(0);
         }
@@ -136,6 +140,12 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
 /// 같은 틱에 여러 로봇이 같은 칸으로 이동을 계획하면, `robot_id`가 가장
 /// 낮은 로봇이 이기고 나머지는 원래 칸으로 되돌린다 — 실행 순서나 스레드
 /// 스케줄링과 무관하게 항상 같은 결과가 나오는 결정적 타이브레이크.
+///
+/// 참고: 이 함수는 같은 칸(vertex) 충돌만 잡아낸다. 두 로봇이 같은 틱에
+/// 서로의 칸을 맞바꾸는 경우(A: X→Y, B: Y→X)는 여기서 걸러지지 않고
+/// 서로를 통과하듯 지나간다 — 이는 설계 문서에 명시된 범위(1칸 예약만
+/// 처리, 시간축까지 포함한 완전한 충돌 탐색은 하지 않음)에 따른 의도된
+/// 단순화이지, 놓친 버그가 아니다.
 fn resolve_intents(intents: &[MoveIntent]) -> Vec<CellId> {
     let mut winner_by_cell: HashMap<CellId, u32> = HashMap::new();
     for intent in intents {
@@ -160,7 +170,7 @@ mod tests {
     use super::*;
 
     fn simple_state(width: i32, height: i32) -> SimState {
-        SimState { grid: Grid::new(width, height), robots: Vec::new(), tick_count: 0 }
+        SimState { grid: Arc::new(Grid::new(width, height)), robots: Vec::new(), tick_count: 0 }
     }
 
     #[test]
