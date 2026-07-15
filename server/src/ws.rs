@@ -59,6 +59,11 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: B
                         }
                     }
                     Err(_) => break,
+                    // NOTE: this collapses tokio::sync::broadcast::error::RecvError::Lagged
+                    // (transient buffer overrun) and ::Closed (channel gone) into the same
+                    // "disconnect" behavior. A lagged client should ideally resync with a
+                    // fresh to_snapshot() instead of being dropped — deferred to Task 9,
+                    // since reconnect/resync semantics are being designed there anyway.
                 }
             }
         }
