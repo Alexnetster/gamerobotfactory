@@ -71,12 +71,12 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: B
                                 let mut guard = state.lock().await;
                                 apply_command(&mut guard, command);
                             }
-                            Err(err) => eprintln!("invalid client command, ignoring: {err}"),
+                            Err(err) => tracing::warn!(error = %err, "invalid client command, ignoring"),
                         }
                     }
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
-                        eprintln!("websocket error, closing connection: {err}");
+                        tracing::warn!(error = %err, "websocket error, closing connection");
                         break;
                     }
                     None => break,
@@ -90,7 +90,7 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: B
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("client lagged behind by {n} messages; resyncing with a full snapshot");
+                        tracing::warn!(missed_messages = n, "client lagged behind; resyncing with a full snapshot");
                         let snapshot = {
                             let guard = state.lock().await;
                             to_snapshot(&guard, own_session_id)
@@ -111,7 +111,7 @@ fn apply_command(state: &mut GameState, command: ClientCommand) {
     match command {
         SelectRobot { robot_id } => {
             if let Err(err) = state.select_robot(robot_id) {
-                eprintln!("SelectRobot rejected: {err:?}");
+                tracing::warn!(?err, "SelectRobot rejected");
             }
         }
         ReleaseRobot => state.release_robot(),
@@ -119,7 +119,7 @@ fn apply_command(state: &mut GameState, command: ClientCommand) {
         SetRobotCount { count } => state.set_robot_count(count),
         TriggerArmAction { robot_id, task } => {
             if let Err(err) = state.trigger_arm_action(robot_id, task.into()) {
-                eprintln!("TriggerArmAction rejected: {err:?}");
+                tracing::warn!(?err, "TriggerArmAction rejected");
             }
         }
         // handle_socket intercepts Resume before calling apply_command, so this

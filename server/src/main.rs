@@ -43,7 +43,7 @@ fn safe_tick(sim: &SimState) -> Option<SimState> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(sim))) {
         Ok(next) => Some(next),
         Err(_) => {
-            eprintln!("tick() panicked; skipping this tick, simulation state unchanged");
+            tracing::error!("tick() panicked; skipping this tick, simulation state unchanged");
             None
         }
     }
@@ -113,6 +113,10 @@ pub fn build_app(state: SharedState, broadcaster: Broadcaster, sessions: ws::Ses
 /// 쉬운 한 줄(`LISTENING_PORT={port}`)로 알려준다.
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let state = initial_state();
     let (broadcaster, _rx) = tokio::sync::broadcast::channel::<protocol::ServerMessage>(32);
     // 32 messages ≈ 1.6s of buffer at the 20Hz tick rate. Not load-tested;
