@@ -49,7 +49,8 @@
 
 ### 로봇 내구도/고장/복구 (설계 완료, 구현 대기)
 사용시간 누적 → 고장 확률 증가 → 오퍼레이터가 부품 교체(복구) → 장애 감지+조치 프로세스를 로봇 도메인에도 적용하자는 아이디어(브레인스토밍 2026-07-16).
-- **설계 완료** — `docs/superpowers/specs/2026-07-16-robot-durability-failure-design.md` (`ba148eb`) — 단일 내구도 값, `(robot_id, tick_count)` 시드 결정적 해시로 병렬 틱과 공존하는 고장 판정, 별도 `status` 필드(기존 `task`와 분리), `RepairRobot` 커맨드, `robot_failures_total`/`robots_repairing` 메트릭, `robot_failure_events` SQLite 테이블. **사용자 스펙 리뷰 승인 대기 중** — 승인되면 writing-plans로 구현 계획 작성.
+- **설계 완료** — `docs/superpowers/specs/2026-07-16-robot-durability-failure-design.md` (`ba148eb`) — 단일 내구도 값, `(robot_id, tick_count)` 시드 결정적 해시로 병렬 틱과 공존하는 고장 판정, 별도 `status` 필드(기존 `task`와 분리), `RepairRobot` 커맨드, `robot_failures_total`/`robots_repairing` 메트릭, `robot_failure_events` SQLite 테이블.
+- **완결성 리뷰 + 갭 수정 완료** (`740d280`) — 독립 리뷰어가 스펙을 코드베이스와 대조 검증. High 2건 실질 발견: (1) `durability_remaining`을 원값 그대로 노출하면 델타 압축(이 프로토콜의 핵심 셀링포인트)이 작업 중인 로봇마다 무력화됨 → 5% 단위 반올림으로 해결(단, `Repairing`의 실시간 카운트다운은 의도적으로 반올림 안 함, 진행률 표시 목적+짧은 지속시간이라 비용 무시 가능). (2) 테스트 전략이 "자연 마모로 확률적 고장을 기다리는" 플레이키 테스트 함정을 명시적으로 막지 못함 → Task 8 사례처럼 되지 않도록 결정적 시딩 방식을 테스트 전략에 명문화. 그 외 Medium/Low: 마모율 계산 중복(→ `wear_ratio()` 단일 소스로 통합), 상태전이 위치 서술 오류(Failed→Repairing은 tick() 밖 ws.rs에서 일어남) 수정, `SetRobotCount`+고장/복구중 로봇 처리 방침 명문화, `selected_robot` 영향 없음 명시, 라인 인용 오탈자 수정. **사용자 스펙 리뷰 승인 대기 중** — 승인되면 writing-plans로 구현 계획 작성.
 
 ### Plan 4~5 (아직 계획 문서 없음, 설계문서 로드맵만 있음)
 - **Plan 4** — 클라이언트 렌더링 (`client/` 디렉토리 자체가 아직 없음 — Vite+TS+Canvas, 아이소메트릭 투영)
