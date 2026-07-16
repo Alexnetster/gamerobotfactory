@@ -23,6 +23,15 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )",
         [],
     )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS robot_failure_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tick INTEGER NOT NULL,
+            robot_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL
+        )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -57,6 +66,43 @@ pub fn recent_stats(conn: &Connection, limit: usize) -> Result<Vec<StatsRow>> {
             robot_count: row.get::<_, i64>(1)? as usize,
             conveyor_running: row.get::<_, i64>(2)? != 0,
             total_production: row.get::<_, f64>(3)? as f32,
+        })
+    })?;
+    rows.collect()
+}
+
+// Deliberately not wired into `main.rs` yet — Task 7 calls into these from
+// the tick loop's status-transition detection. Same write-then-wire-later
+// pattern as `stats_history` above (see this file's history for precedent);
+// `#[allow(dead_code)]` is scoped to just these new items rather than the
+// whole module since `insert_stats`/`recent_stats` are already wired.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FailureEvent {
+    pub tick: u64,
+    pub robot_id: u32,
+    pub event_type: String,
+}
+
+#[allow(dead_code)]
+pub fn insert_failure_event(conn: &Connection, tick: u64, robot_id: u32, event_type: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO robot_failure_events (tick, robot_id, event_type) VALUES (?1, ?2, ?3)",
+        params![tick as i64, robot_id as i64, event_type],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn recent_failure_events(conn: &Connection, limit: usize) -> Result<Vec<FailureEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT tick, robot_id, event_type FROM robot_failure_events ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(FailureEvent {
+            tick: row.get::<_, i64>(0)? as u64,
+            robot_id: row.get::<_, i64>(1)? as u32,
+            event_type: row.get(2)?,
         })
     })?;
     rows.collect()
@@ -101,6 +147,35 @@ mod tests {
     fn recent_stats_on_empty_db_returns_empty_vec() {
         let conn = test_db();
         let rows = recent_stats(&conn, 10).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn insert_and_read_back_a_failure_event() {
+        let conn = test_db();
+        insert_failure_event(&conn, 42, 3, "failed").unwrap();
+
+        let rows = recent_failure_events(&conn, 10).unwrap();
+
+        assert_eq!(rows, vec![FailureEvent { tick: 42, robot_id: 3, event_type: "failed".to_string() }]);
+    }
+
+    #[test]
+    fn recent_failure_events_returns_newest_first_and_respects_limit() {
+        let conn = test_db();
+        for tick in 0..5u64 {
+            insert_failure_event(&conn, tick, 1, "failed").unwrap();
+        }
+
+        let rows = recent_failure_events(&conn, 2).unwrap();
+
+        assert_eq!(rows.iter().map(|r| r.tick).collect::<Vec<_>>(), vec![4, 3]);
+    }
+
+    #[test]
+    fn recent_failure_events_on_empty_db_returns_empty_vec() {
+        let conn = test_db();
+        let rows = recent_failure_events(&conn, 10).unwrap();
         assert!(rows.is_empty());
     }
 }
