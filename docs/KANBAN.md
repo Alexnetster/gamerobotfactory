@@ -28,13 +28,14 @@
 ## In Progress
 
 ### Plan 3 — 영속화 + REST API + 관측가능성 + 하드닝 (`docs/superpowers/plans/2026-07-15-persistence-observability-plan.md`)
-계획서(`285ca15`, 관측가능성 보강 `dd65136`, `connected_clients` 배선 보강 `4df0e5b`). 10개 태스크: (1)~~세션 재접속 실배선+Lagged 리싱크~~ ✅, (2)~~틱 루프 패닉 방어(`safe_tick`)~~ ✅, (3)~~SQLite 영속화~~ ✅, (4)~~`AppConfig`+`/api/config`~~ ✅, (5)~~Prometheus `/metrics`(+`tick_panics_total`)~~ ✅, (6)tracing 구조화 로깅, (7)전부 `main.rs`+`ws.rs`에 배선(`connected_clients` RAII 가드 포함), (8)Lagged 통합테스트, (9)Resume 통합테스트, (10)REST/영속화/메트릭 통합테스트.
+계획서(`285ca15`, 관측가능성 보강 `dd65136`, `connected_clients` 배선 보강 `4df0e5b`). 10개 태스크: (1)~~세션 재접속 실배선+Lagged 리싱크~~ ✅, (2)~~틱 루프 패닉 방어(`safe_tick`)~~ ✅, (3)~~SQLite 영속화~~ ✅, (4)~~`AppConfig`+`/api/config`~~ ✅, (5)~~Prometheus `/metrics`(+`tick_panics_total`)~~ ✅, (6)~~tracing 구조화 로깅~~ ✅, (7)전부 `main.rs`+`ws.rs`에 배선(`connected_clients` RAII 가드 포함), (8)Lagged 통합테스트, (9)Resume 통합테스트, (10)REST/영속화/메트릭 통합테스트.
 
 - **Task 1 완료** — 세션 재접속 실배선 + Lagged 리싱크 (`7db4e37`, 문서 보강 `fa2fb1c`) — 실제 WS 클라이언트로 구현자·리뷰어 각자 독립 검증됨(초기 스냅샷에 진짜 session_id, 유효/무효 Resume 각각 정확히 응답). Plan 2 종료 시 남겨뒀던 하드닝 갭 3개 중 2개(재접속 배선, Lagged 처리) 해소.
 - **Task 2 완료** — 틱 루프 패닉 방어 `safe_tick` (`d39b265`, 문서 보강 `10afdbe`) — Plan 2 이후 남은 하드닝 갭 3개 전부 해소. 리뷰에서 "패닉 시 조용히 멈추는 게 관측 안 됨" 지적이 나와, 아직 실행 전인 Task 5/7에 `tick_panics_total` 카운터를 미리 반영해둠(`dd65136`).
 - **Task 3 완료** — `persistence.rs` SQLite 영속화 (`9b0945b`) — `session.rs` 때와 같은 이유로 `#![allow(dead_code)]`(아직 미배선, Task 7에서 연결). 스키마 버전/마이그레이션 없음은 의도적으로 남겨둔 갭(포트폴리오 스코프에서 지금 만들 필요 없음).
 - **Task 4 완료** — `config.rs` `AppConfig` + `GET`/`POST /api/config` (`170deb3`, TODO 주석 보강 `84fcdfe`) — 필드가 하나뿐이라 지금은 전체 교체 방식, 필드 늘어나면 부분 업데이트 방식으로 바꿔야 한다는 점을 주석으로 남겨둠.
 - **Task 5 완료** — `metrics.rs` Prometheus 레지스트리(`ticks_total`/`connected_clients`/`robot_count`/`tick_panics_total`) (`0b26862`, 주석 정확도 수정 `4df0e5b`) — 리뷰에서 "`connected_clients`를 `ws.rs`의 여러 exit 지점마다 수동으로 inc/dec하면 하나라도 빠뜨려 게이지가 샌다"는 지적이 나와, 아직 실행 전인 Task 7에 RAII 가드(`ConnectionGuard`) 배선을 미리 설계해둠(`4df0e5b`).
+- **Task 6 완료** — `tracing`/`tracing-subscriber` 구조화 로깅으로 `eprintln!` 전체 교체 (`1e75e00`) — 코드 품질 리뷰에서 "`EnvFilter::from_default_env()`는 `RUST_LOG` 미설정 시 ERROR만 통과시켜, 방금 추가한 `warn!` 로그 6개 중 5개가 `cargo run`만으로는 전혀 안 보인다"는 지적이 나와, `try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))`로 수정(`19b2237`) — `RUST_LOG` 미설정 상태에서 WARN 로그가 실제로 출력되는 것까지 직접 재확인됨.
 
 ## Backlog
 
