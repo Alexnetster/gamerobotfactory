@@ -14,6 +14,8 @@ sim_core (라이브러리, 네트워크 의존성 없음)
 server (바이너리, sim_core에 의존)
   GameState(컨베이어/로봇수/선택/팔동작) · JSON 와이어 프로토콜(버전 필드,
   변경분만 담는 델타) · 20Hz 틱 루프 + 브로드캐스트 · axum WebSocket 핸들러
+  세션/재접속 + Lagged 리싱크 · SQLite 영속화 · REST 설정 API ·
+  Prometheus 메트릭 · tracing 구조화 로깅
 ```
 
 두 부분 다 같은 Cargo 패키지(`gamerobotfactory-server`) 안에서 라이브러리 타깃(`sim_core`)과 바이너리 타깃(`server`)으로 나뉘어 있다.
@@ -42,16 +44,26 @@ cargo clippy --manifest-path server/Cargo.toml --all-targets
 
 접속하면 즉시 전체 스냅샷을 받고, 이후 20Hz로 변경분만 담은 델타 메시지를 받는다.
 
+REST/관측가능성 엔드포인트:
+
+```bash
+curl http://127.0.0.1:<포트>/api/config          # 현재 설정 조회
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"persist_every_n_ticks":10}' http://127.0.0.1:<포트>/api/config
+curl http://127.0.0.1:<포트>/api/stats/history    # 최근 영속화된 생산 통계
+curl http://127.0.0.1:<포트>/metrics              # Prometheus 텍스트 포맷
+```
+
 ## 지금까지 만든 것
 
 - **Plan 1 — 결정적 시뮬레이션 코어**: 그리드/A* 경로탐색, 로봇 ID 기반 결정적 타이브레이크가 있는 병렬 틱, 로봇 하나가 패닉해도 나머지는 정상 갱신되는 격리, 트롯 보행 애니메이션, 2-본 IK(몸체 자세와 연결됨), 부동소수점 합산 순서에 영향받지 않는 생산량 집계.
-- **Plan 2 — WS 프로토콜 & 네트워킹**: 실제로 뜨는 axum 서버, 커맨드 검증(존재하지 않는 로봇 거부, `SetRobotCount` 상한 클램프), 클라이언트별로 바뀐 로봇만 보내는 델타 동기화, 재접속 유예시간 로직(아직 실배선은 안 됨).
+- **Plan 2 — WS 프로토콜 & 네트워킹**: 실제로 뜨는 axum 서버, 커맨드 검증(존재하지 않는 로봇 거부, `SetRobotCount` 상한 클램프), 클라이언트별로 바뀐 로봇만 보내는 델타 동기화.
+- **Plan 3 — 영속화 + REST API + 관측가능성 + 하드닝**: 세션 재접속 실배선(30초 유예시간) + 브로드캐스트 Lagged 리싱크(끊지 않고 스냅샷으로 재동기화), 틱 루프 패닉 격리(`safe_tick`), SQLite로 생산 통계 주기 영속화 + `GET /api/stats/history`, WS(실시간)와 분리된 `GET`/`POST /api/config`, `tracing` 구조화 로깅 + `/metrics` Prometheus 엔드포인트(틱 수/연결 수/로봇 수/틱 패닉 수). 통합테스트 전반에서 뮤테이션 테스트로 실제로 잡아낸 공허한 테스트를 재작성하는 등, 리뷰 과정에서 여러 실질 버그를 발견해 수정.
 
-**현재: 67개 테스트 통과, clippy 경고 0개.**
+**현재: 84개 테스트 통과, clippy 경고 0개.**
 
 ## 다음 단계
 
-- **Plan 3**: SQLite 영속화, REST API, 관측가능성(`/metrics`, tracing) — 여기서 재접속 실배선과 틱 루프 패닉 주입 테스트도 함께 다룰 예정.
 - **Plan 4**: 클라이언트 렌더링 (Vite+TS+Canvas, 아이소메트릭 투영) — 아직 `client/` 디렉토리 자체가 없다.
 - **Plan 5**: 데모/배포 (Docker, 라이브 URL, 성능 목표 실측).
 
