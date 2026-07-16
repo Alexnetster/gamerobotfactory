@@ -187,3 +187,46 @@ async fn metrics_endpoint_exposes_prometheus_text_with_tick_counter() {
 
     let _ = std::fs::remove_file(&db_path);
 }
+
+#[tokio::test]
+async fn robot_failures_endpoint_returns_an_empty_list_when_nothing_has_failed() {
+    let db_path = temp_db_path("robot-failures");
+    let server = spawn_server_with_isolated_db(&db_path);
+    let base = format!("http://127.0.0.1:{}", server.port);
+    let client = reqwest::Client::new();
+
+    let history: Vec<serde_json::Value> = client
+        .get(format!("{base}/api/robots/failures"))
+        .send()
+        .await
+        .expect("GET /api/robots/failures failed")
+        .json()
+        .await
+        .expect("response was not valid JSON");
+    assert!(history.is_empty(), "no robot should have failed in a fresh, brief-lived server");
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn metrics_endpoint_exposes_robot_failure_gauges_at_their_baseline() {
+    let db_path = temp_db_path("robot-failure-metrics");
+    let server = spawn_server_with_isolated_db(&db_path);
+    let base = format!("http://127.0.0.1:{}", server.port);
+    let client = reqwest::Client::new();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let response = client.get(format!("{base}/metrics")).send().await.expect("GET /metrics failed");
+    let body = response.text().await.expect("failed to read metrics body");
+
+    // 실제로 고장이 발생하는 걸 기다리는 건(자연 마모로 2000틱=100초 +
+    // 확률적 지연) 이 테스트를 느리고 취약하게 만든다 — 대신 두 지표가
+    // 노출되고 있고, 짧은 실행 동안 고장이 없었다는 정상적인 기저값(0)을
+    // 보이는지만 확인한다. 값이 실제로 바뀌는 로직(detect_status_transitions)
+    // 자체는 main.rs의 결정적 단위테스트가 이미 검증한다.
+    assert!(body.contains("gamerobotfactory_robot_failures_total 0"));
+    assert!(body.contains("gamerobotfactory_robots_repairing 0"));
+
+    let _ = std::fs::remove_file(&db_path);
+}

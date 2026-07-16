@@ -52,6 +52,27 @@ async fn stats_history(Extension(db): Extension<DbHandle>) -> impl IntoResponse 
     }
 }
 
+async fn robot_failures(Extension(db): Extension<DbHandle>) -> impl IntoResponse {
+    let rows = tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        persistence::recent_failure_events(&conn, 50)
+    })
+    .await;
+
+    match rows {
+        Ok(Ok(rows)) => axum::Json(rows).into_response(),
+        Ok(Err(err)) => {
+            tracing::error!(%err, "failed to read robot failure history");
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
+        Err(join_err) => {
+            tracing::error!(%join_err, "robot failure history query task panicked");
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal error reading robot failure history".to_string())
+                .into_response()
+        }
+    }
+}
+
 fn initial_state() -> SharedState {
     let sim = SimState { grid: Arc::new(Grid::new(10, 10)), robots: Vec::new(), tick_count: 0 };
     Arc::new(Mutex::new(GameState::new(sim)))
@@ -75,6 +96,42 @@ fn safe_tick(sim: &SimState) -> Option<SimState> {
             None
         }
     }
+}
+
+/// 이전 틱과 이번 틱의 로봇별 상태를 ID 기준으로 비교해, 로그해야 할 전이
+/// (Operational -> Failed, Repairing -> Operational)를 찾아낸다. 순수
+/// 함수로 분리해둔 이유: 실제 tick()/rayon/결정적 확률 굴림 없이도 이
+/// 로직 자체를 빠르고 결정적으로 단위테스트할 수 있게 하기 위함 — 실제
+/// 확률적 사건이 벽시계 안에서 일어나길 기다리는 통합테스트는 느리고
+/// 취약해지기 쉽다(Task 8 Lagged 리싱크 사건과 같은 이유). `ws.rs`의
+/// `decide_broadcast_update`와 같은 패턴.
+fn detect_status_transitions(
+    previous_robots: &[protocol::RobotView],
+    current_robots: &[protocol::RobotView],
+    tick: u64,
+) -> Vec<persistence::FailureEvent> {
+    let mut events = Vec::new();
+    for current in current_robots {
+        let Some(previous) = previous_robots.iter().find(|p| p.id == current.id) else { continue };
+        match (previous.status, current.status) {
+            (protocol::WireStatus::Operational, protocol::WireStatus::Failed) => {
+                events.push(persistence::FailureEvent {
+                    tick,
+                    robot_id: current.id,
+                    event_type: "failed".to_string(),
+                });
+            }
+            (protocol::WireStatus::Repairing { .. }, protocol::WireStatus::Operational) => {
+                events.push(persistence::FailureEvent {
+                    tick,
+                    robot_id: current.id,
+                    event_type: "repaired".to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    events
 }
 
 /// 백그라운드에서 20Hz로 시뮬레이션을 전진시키고, 마지막으로 브로드캐스트한
@@ -109,7 +166,7 @@ fn spawn_tick_loop(
             // `spawn_blocking` 영속화 디스패치(비동기, 락 밖)는 20Hz 틱 예산과
             // 직접 경합하는 동기 작업이 아니므로 측정 범위에서 제외한다.
             let tick_processing_start = std::time::Instant::now();
-            let (message, next_snapshot, should_persist, stats_row) = {
+            let (message, next_snapshot, should_persist, stats_row, failure_events) = {
                 let mut guard = state.lock().await;
                 match safe_tick(&guard.sim) {
                     Some(next_sim) => guard.sim = next_sim,
@@ -124,15 +181,33 @@ fn spawn_tick_loop(
 
                 metrics.ticks_total.inc();
                 metrics.robot_count.set(guard.sim.robots.len() as i64);
+                metrics.robots_repairing.set(
+                    guard
+                        .sim
+                        .robots
+                        .iter()
+                        .filter(|r| matches!(r.status, sim_core::sim::RobotStatus::Repairing { .. }))
+                        .count() as i64,
+                );
 
                 let current_snapshot = to_snapshot(&guard, uuid::Uuid::nil());
-                let delta = match (&last_snapshot, &current_snapshot) {
+                let (delta, failure_events) = match (&last_snapshot, &current_snapshot) {
                     (
                         protocol::ServerMessage::Snapshot { conveyor: prev_conveyor, robots: prev_robots, .. },
                         protocol::ServerMessage::Snapshot { tick: cur_tick, conveyor: cur_conveyor, robots: cur_robots, .. },
-                    ) => compute_delta(*prev_conveyor, prev_robots, *cur_tick, *cur_conveyor, cur_robots),
-                    _ => current_snapshot.clone(),
+                    ) => {
+                        let delta = compute_delta(*prev_conveyor, prev_robots, *cur_tick, *cur_conveyor, cur_robots);
+                        let events = detect_status_transitions(prev_robots, cur_robots, *cur_tick);
+                        (delta, events)
+                    }
+                    _ => (current_snapshot.clone(), Vec::new()),
                 };
+
+                for event in &failure_events {
+                    if event.event_type == "failed" {
+                        metrics.robot_failures_total.inc();
+                    }
+                }
 
                 let should_persist = guard.sim.tick_count % persist_every_n_ticks == 0;
                 let stats_row = persistence::StatsRow {
@@ -142,7 +217,7 @@ fn spawn_tick_loop(
                     total_production: total_production_value,
                 };
 
-                (delta, current_snapshot, should_persist, stats_row)
+                (delta, current_snapshot, should_persist, stats_row, failure_events)
             };
             metrics.tick_duration_seconds.observe(tick_processing_start.elapsed().as_secs_f64());
 
@@ -164,6 +239,26 @@ fn spawn_tick_loop(
                     }
                 });
             }
+
+            if !failure_events.is_empty() {
+                let db = Arc::clone(&db);
+                tokio::task::spawn_blocking(move || {
+                    let conn = match db.lock() {
+                        Ok(conn) => conn,
+                        Err(err) => {
+                            tracing::error!(%err, "db mutex poisoned; skipping failure event persist");
+                            return;
+                        }
+                    };
+                    for event in &failure_events {
+                        if let Err(err) =
+                            persistence::insert_failure_event(&conn, event.tick, event.robot_id, &event.event_type)
+                        {
+                            tracing::error!(%err, "failed to persist robot failure event");
+                        }
+                    }
+                });
+            }
         }
     });
 }
@@ -180,6 +275,7 @@ pub fn build_app(
         .route("/health", get(health))
         .route("/ws", get(ws_route))
         .route("/api/stats/history", get(stats_history))
+        .route("/api/robots/failures", get(robot_failures))
         .route("/api/config", get(get_config).post(post_config))
         .route("/metrics", get(metrics_route))
         .with_state(state)
@@ -250,5 +346,67 @@ mod tests {
         // 패턴(패턴 자체를 검증 + 정상 경로 테스트로 실제 배선까지 커버).
         let result: std::thread::Result<i32> = std::panic::catch_unwind(|| panic!("simulated tick fault"));
         assert!(result.is_err());
+    }
+
+    fn sample_robot_view(id: u32, status: protocol::WireStatus) -> protocol::RobotView {
+        protocol::RobotView {
+            id,
+            pos: protocol::WireCellId { x: 0, y: 0 },
+            pose: protocol::WirePose::Standing,
+            leg_cycle_progress: 0.0,
+            task: protocol::WireTask::Idle,
+            status,
+            durability_remaining: 1.0,
+        }
+    }
+
+    #[test]
+    fn detects_a_new_failure() {
+        let previous = vec![sample_robot_view(1, protocol::WireStatus::Operational)];
+        let current = vec![sample_robot_view(1, protocol::WireStatus::Failed)];
+
+        let events = detect_status_transitions(&previous, &current, 42);
+
+        assert_eq!(events, vec![persistence::FailureEvent { tick: 42, robot_id: 1, event_type: "failed".to_string() }]);
+    }
+
+    #[test]
+    fn detects_a_completed_repair() {
+        let previous = vec![sample_robot_view(1, protocol::WireStatus::Repairing { remaining_ticks: 1 })];
+        let current = vec![sample_robot_view(1, protocol::WireStatus::Operational)];
+
+        let events = detect_status_transitions(&previous, &current, 7);
+
+        assert_eq!(events, vec![persistence::FailureEvent { tick: 7, robot_id: 1, event_type: "repaired".to_string() }]);
+    }
+
+    #[test]
+    fn no_event_for_an_unrelated_change() {
+        let previous = vec![sample_robot_view(1, protocol::WireStatus::Operational)];
+        let current = vec![sample_robot_view(1, protocol::WireStatus::Operational)];
+
+        let events = detect_status_transitions(&previous, &current, 1);
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn no_event_for_a_removed_robot() {
+        let previous = vec![sample_robot_view(1, protocol::WireStatus::Failed)];
+        let current: Vec<protocol::RobotView> = vec![];
+
+        let events = detect_status_transitions(&previous, &current, 1);
+
+        assert!(events.is_empty(), "a removed robot should not generate a spurious event");
+    }
+
+    #[test]
+    fn no_event_for_a_brand_new_robot() {
+        let previous: Vec<protocol::RobotView> = vec![];
+        let current = vec![sample_robot_view(5, protocol::WireStatus::Operational)];
+
+        let events = detect_status_transitions(&previous, &current, 1);
+
+        assert!(events.is_empty(), "a robot with no previous entry should not be treated as a transition");
     }
 }

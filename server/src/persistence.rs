@@ -71,12 +71,10 @@ pub fn recent_stats(conn: &Connection, limit: usize) -> Result<Vec<StatsRow>> {
     rows.collect()
 }
 
-// Deliberately not wired into `main.rs` yet — Task 7 calls into these from
-// the tick loop's status-transition detection. Same write-then-wire-later
-// pattern as `stats_history` above (see this file's history for precedent);
-// `#[allow(dead_code)]` is scoped to just these new items rather than the
-// whole module since `insert_stats`/`recent_stats` are already wired.
-#[allow(dead_code)]
+// Wired into `main.rs`'s tick loop: `detect_status_transitions` produces
+// `FailureEvent`s, which are persisted via `insert_failure_event` from inside
+// `spawn_blocking`, and the `/api/robots/failures` REST handler reads them
+// back via `recent_failure_events`. Same pattern as `stats_history` above.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FailureEvent {
     pub tick: u64,
@@ -84,7 +82,6 @@ pub struct FailureEvent {
     pub event_type: String,
 }
 
-#[allow(dead_code)]
 pub fn insert_failure_event(conn: &Connection, tick: u64, robot_id: u32, event_type: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO robot_failure_events (tick, robot_id, event_type) VALUES (?1, ?2, ?3)",
@@ -93,7 +90,6 @@ pub fn insert_failure_event(conn: &Connection, tick: u64, robot_id: u32, event_t
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn recent_failure_events(conn: &Connection, limit: usize) -> Result<Vec<FailureEvent>> {
     let mut stmt = conn.prepare(
         "SELECT tick, robot_id, event_type FROM robot_failure_events ORDER BY id DESC LIMIT ?1",
