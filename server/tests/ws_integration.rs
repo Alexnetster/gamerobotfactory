@@ -191,6 +191,40 @@ async fn resume_with_an_unknown_session_id_is_not_acknowledged() {
     assert!(saw_ack, "expected a ResumeAck message with resumed:false");
 }
 
+#[tokio::test]
+async fn repair_robot_on_a_healthy_robot_is_rejected_without_crashing_the_connection() {
+    // 실제로 로봇을 고장내서 성공 경로까지 테스트하지는 않는다 — 자연
+    // 마모(2000틱=100초)+확률적 지연을 기다리는 건 느리고 취약한 테스트가
+    // 된다(설계문서/Task 8의 교훈). 여기서는 거부 경로가 연결을 죽이지
+    // 않는지만 실제 서버로 확인하고, 성공 경로는 game_state.rs의 결정적
+    // 단위테스트가 이미 검증한다.
+    let server = spawn_server();
+
+    let url = format!("ws://127.0.0.1:{}/ws", server.port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("failed to connect to ws endpoint");
+    let (mut write, mut read) = ws_stream.split();
+
+    let _first = read.next().await.expect("stream ended early");
+
+    write.send(Message::Text(r#"{"type":"SetRobotCount","count":1}"#.to_string())).await.unwrap();
+    write.send(Message::Text(r#"{"type":"RepairRobot","robot_id":0}"#.to_string())).await.unwrap();
+    write.send(Message::Text(r#"{"type":"ToggleConveyor"}"#.to_string())).await.unwrap();
+
+    let mut still_connected = false;
+    for _ in 0..20 {
+        match tokio::time::timeout(Duration::from_millis(200), read.next()).await {
+            Ok(Some(Ok(_))) => {
+                still_connected = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(still_connected, "connection should survive a RepairRobot command rejected for a non-failed robot");
+}
+
 // NOTE: an earlier version of this file had a black-box
 // `lagged_client_resyncs_instead_of_disconnecting` test here that simply
 // stopped reading the client socket for 3+ seconds and then asserted the
