@@ -102,6 +102,13 @@ fn spawn_tick_loop(
 
             let persist_every_n_ticks = { *config.lock().await }.persist_every_n_ticks;
 
+            // 이 틱의 처리 시간을 측정한다: 락 획득부터(경합이 있으면 그 대기까지
+            // 포함) tick/생산량 집계/스냅샷·델타 계산까지 — 디자인 문서의
+            // "틱 처리 시간 p99 < 10ms" 목표가 재는 대상이 바로 이 구간이다.
+            // 아래 `broadcaster.send(...)`(락 해제 후 fire-and-forget)와
+            // `spawn_blocking` 영속화 디스패치(비동기, 락 밖)는 20Hz 틱 예산과
+            // 직접 경합하는 동기 작업이 아니므로 측정 범위에서 제외한다.
+            let tick_processing_start = std::time::Instant::now();
             let (message, next_snapshot, should_persist, stats_row) = {
                 let mut guard = state.lock().await;
                 match safe_tick(&guard.sim) {
@@ -137,6 +144,7 @@ fn spawn_tick_loop(
 
                 (delta, current_snapshot, should_persist, stats_row)
             };
+            metrics.tick_duration_seconds.observe(tick_processing_start.elapsed().as_secs_f64());
 
             last_snapshot = next_snapshot;
             let _ = broadcaster.send(message);

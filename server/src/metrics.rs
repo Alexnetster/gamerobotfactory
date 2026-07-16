@@ -5,8 +5,8 @@
 use axum::extract::Extension;
 use axum::response::IntoResponse;
 use prometheus::{
-    register_int_counter_with_registry, register_int_gauge_with_registry, Encoder, IntCounter, IntGauge, Registry,
-    TextEncoder,
+    register_histogram_with_registry, register_int_counter_with_registry, register_int_gauge_with_registry, Encoder,
+    Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder,
 };
 use std::sync::Arc;
 
@@ -21,6 +21,13 @@ pub struct Metrics {
     /// 없다 — Task 2 코드 리뷰에서 지적된 "조용한 멈춤" 관측 공백을
     /// 메우는 지표.
     pub tick_panics_total: IntCounter,
+    /// 틱 하나를 처리하는 데 걸린 시간(초). 디자인 문서(설계 문서 ~101줄)의
+    /// "틱 처리 시간 p99 < 10ms" 목표를 실제로 측정하기 위한 히스토그램 —
+    /// `histogram_quantile(0.99, rate(gamerobotfactory_tick_duration_seconds_bucket[...]))`로
+    /// Prometheus/Grafana에서 바로 p99를 뽑아낼 수 있도록 `_seconds` 접미사
+    /// (Prometheus 베이스 단위 컨벤션)를 쓴다. 버킷 경계는 10ms 목표를 중심으로
+    /// 그 아래/위 양쪽에 여유를 둬서 p99가 실제로 분해 가능하도록 잡았다.
+    pub tick_duration_seconds: Histogram,
 }
 
 impl Metrics {
@@ -31,27 +38,35 @@ impl Metrics {
             "Total simulation ticks processed",
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 4 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
         let connected_clients = register_int_gauge_with_registry!(
             "gamerobotfactory_connected_clients",
             "Currently connected WebSocket clients",
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 4 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
         let robot_count = register_int_gauge_with_registry!(
             "gamerobotfactory_robot_count",
             "Current number of robots in the simulation",
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 4 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
         let tick_panics_total = register_int_counter_with_registry!(
             "gamerobotfactory_tick_panics_total",
             "Total number of ticks where sim_core::sim::tick panicked and was skipped",
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 4 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
+        let tick_duration_seconds = register_histogram_with_registry!(
+            HistogramOpts::new("gamerobotfactory_tick_duration_seconds", "Time spent processing a single simulation tick, in seconds")
+                .buckets(vec![
+                    0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+                ]),
+            registry
+        )
+        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
 
-        Metrics { registry, ticks_total, connected_clients, robot_count, tick_panics_total }
+        Metrics { registry, ticks_total, connected_clients, robot_count, tick_panics_total, tick_duration_seconds }
     }
 
     pub fn encode(&self) -> (String, Vec<u8>) {
@@ -92,6 +107,7 @@ mod tests {
         assert!(text.contains("gamerobotfactory_connected_clients"));
         assert!(text.contains("gamerobotfactory_robot_count"));
         assert!(text.contains("gamerobotfactory_tick_panics_total"));
+        assert!(text.contains("gamerobotfactory_tick_duration_seconds"));
     }
 
     #[test]
@@ -102,5 +118,20 @@ mod tests {
         let (_, body) = metrics.encode();
         let text = String::from_utf8(body).unwrap();
         assert!(text.contains("gamerobotfactory_ticks_total 2"));
+    }
+
+    #[test]
+    fn observing_a_tick_duration_is_reflected_in_the_encoded_output() {
+        let metrics = Metrics::new();
+        let (_, fresh_body) = metrics.encode();
+        let fresh_text = String::from_utf8(fresh_body).unwrap();
+        assert!(fresh_text.contains("gamerobotfactory_tick_duration_seconds_count 0"));
+
+        metrics.tick_duration_seconds.observe(0.002);
+        metrics.tick_duration_seconds.observe(0.004);
+        let (_, body) = metrics.encode();
+        let text = String::from_utf8(body).unwrap();
+        assert!(text.contains("gamerobotfactory_tick_duration_seconds_count 2"));
+        assert!(text.contains("gamerobotfactory_tick_duration_seconds_sum 0.006"));
     }
 }

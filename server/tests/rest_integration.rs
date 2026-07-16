@@ -174,5 +174,16 @@ async fn metrics_endpoint_exposes_prometheus_text_with_tick_counter() {
     let ticks_total = parse_metric_value(&body, "gamerobotfactory_ticks_total");
     assert!(ticks_total > 0, "expected gamerobotfactory_ticks_total to have advanced past 0, got {ticks_total}");
 
+    // tick_duration_seconds의 `_count` 서픽스가 0보다 큰지까지 확인해서, 이
+    // 히스토그램이 틱 루프 안에서 실제로 `.observe(...)`되고 있다는 것을
+    // 검증한다 — 등록만 되어 있으면(관측이 한 번도 없어도) `_count 0`이라는
+    // 줄 자체는 항상 출력되므로, 이름 존재 여부만으로는 배선을 증명하지
+    // 못한다(ticks_total에 대한 위 주석과 같은 이유).
+    let tick_duration_count = parse_metric_value(&body, "gamerobotfactory_tick_duration_seconds_count");
+    assert!(
+        tick_duration_count > 0,
+        "expected gamerobotfactory_tick_duration_seconds_count to have advanced past 0, got {tick_duration_count}"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
