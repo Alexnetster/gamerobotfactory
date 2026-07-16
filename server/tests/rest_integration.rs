@@ -190,6 +190,14 @@ async fn metrics_endpoint_exposes_prometheus_text_with_tick_counter() {
 
 #[tokio::test]
 async fn robot_failures_endpoint_returns_an_empty_list_when_nothing_has_failed() {
+    // Note: this server starts with zero robots (nothing calls
+    // SetRobotCount), so "no failure occurred" is trivially guaranteed by
+    // there being no robots at all, not by a genuinely short observation
+    // window. This test still earns its keep as the empty-list-default half
+    // of the REST contract; the genuine persist -> read round trip is
+    // covered by `robot_failures_endpoint_returns_previously_persisted_failure_events`
+    // below, which pre-seeds a real row and reads it back through the actual
+    // REST/JSON layer.
     let db_path = temp_db_path("robot-failures");
     let server = spawn_server_with_isolated_db(&db_path);
     let base = format!("http://127.0.0.1:{}", server.port);
@@ -204,6 +212,65 @@ async fn robot_failures_endpoint_returns_an_empty_list_when_nothing_has_failed()
         .await
         .expect("response was not valid JSON");
     assert!(history.is_empty(), "no robot should have failed in a fresh, brief-lived server");
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn robot_failures_endpoint_returns_previously_persisted_failure_events() {
+    // Waiting for a *real* failure to occur organically (natural wear takes
+    // 2000 ticks = 100s at 20Hz, plus a probabilistic delay on top) is
+    // exactly the flaky/slow pattern this project avoids. Instead, pre-seed
+    // the isolated SQLite file directly with a known row before the server
+    // (and its tick loop) ever starts, then prove the real REST-read path —
+    // `persistence::recent_failure_events` -> serde_json -> axum::Json` —
+    // actually returns it.
+    //
+    // We can't call `persistence::open_db`/`insert_failure_event` directly
+    // from this integration test binary: `persistence` is a module private
+    // to the `server` binary crate, not part of the `sim_core` lib target
+    // that integration tests link against. So this replicates the exact
+    // schema and insert statement from `server/src/persistence.rs` via
+    // `rusqlite` directly (a normal, non-dev dependency of this package).
+    let db_path = temp_db_path("robot-failures-seeded");
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("failed to open db for seeding");
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS robot_failure_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tick INTEGER NOT NULL,
+                robot_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL
+            )",
+            [],
+        )
+        .expect("failed to create robot_failure_events table while seeding");
+        conn.execute(
+            "INSERT INTO robot_failure_events (tick, robot_id, event_type) VALUES (?1, ?2, ?3)",
+            rusqlite::params![42i64, 7i64, "failed"],
+        )
+        .expect("failed to seed a robot_failure_events row");
+        // conn drops here, before the server (and its own open_db/init_schema,
+        // which is CREATE TABLE IF NOT EXISTS and so won't wipe this row) starts.
+    }
+
+    let server = spawn_server_with_isolated_db(&db_path);
+    let base = format!("http://127.0.0.1:{}", server.port);
+    let client = reqwest::Client::new();
+
+    let history: Vec<serde_json::Value> = client
+        .get(format!("{base}/api/robots/failures"))
+        .send()
+        .await
+        .expect("GET /api/robots/failures failed")
+        .json()
+        .await
+        .expect("response was not valid JSON");
+
+    assert_eq!(history.len(), 1, "expected exactly the one pre-seeded failure event, got {history:?}");
+    assert_eq!(history[0]["tick"], 42);
+    assert_eq!(history[0]["robot_id"], 7);
+    assert_eq!(history[0]["event_type"], "failed");
 
     let _ = std::fs::remove_file(&db_path);
 }

@@ -409,4 +409,31 @@ mod tests {
 
         assert!(events.is_empty(), "a robot with no previous entry should not be treated as a transition");
     }
+
+    #[test]
+    fn already_failed_robot_does_not_refire() {
+        // Regression guard for the exact double-counting bug this function's
+        // doc comment warns about: a robot that stays Failed for many ticks
+        // must fire the "failed" event exactly once, on the Operational ->
+        // Failed edge, not on every tick it remains Failed.
+        let previous = vec![sample_robot_view(1, protocol::WireStatus::Failed)];
+        let current = vec![sample_robot_view(1, protocol::WireStatus::Failed)];
+
+        let events = detect_status_transitions(&previous, &current, 1);
+
+        assert!(events.is_empty(), "a robot that was already Failed must not refire a failed event every tick");
+    }
+
+    #[test]
+    fn still_repairing_robot_does_not_fire_a_repaired_event() {
+        // Companion to the above for the other transition: a robot that is
+        // still counting down Repairing has not reached Operational yet, so
+        // no "repaired" event should fire.
+        let previous = vec![sample_robot_view(1, protocol::WireStatus::Repairing { remaining_ticks: 5 })];
+        let current = vec![sample_robot_view(1, protocol::WireStatus::Repairing { remaining_ticks: 4 })];
+
+        let events = detect_status_transitions(&previous, &current, 1);
+
+        assert!(events.is_empty(), "a robot still Repairing (not yet Operational) must not fire a repaired event");
+    }
 }
