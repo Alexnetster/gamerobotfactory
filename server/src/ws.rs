@@ -18,18 +18,18 @@ pub type SessionHandle = Arc<Mutex<crate::session::SessionRegistry>>;
 /// gauge upward forever if any one of them were missed (flagged in Task 5's
 /// code review) — RAII makes that impossible by construction, since `Drop`
 /// runs no matter which path out of the function is taken, panics included.
-struct ConnectionGuard<'a> {
-    counter: &'a prometheus::IntGauge,
+struct ConnectionGuard {
+    counter: prometheus::IntGauge,
 }
 
-impl<'a> ConnectionGuard<'a> {
-    fn new(counter: &'a prometheus::IntGauge) -> Self {
+impl ConnectionGuard {
+    fn new(counter: &prometheus::IntGauge) -> Self {
         counter.inc();
-        ConnectionGuard { counter }
+        ConnectionGuard { counter: counter.clone() }
     }
 }
 
-impl<'a> Drop for ConnectionGuard<'a> {
+impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.counter.dec();
     }

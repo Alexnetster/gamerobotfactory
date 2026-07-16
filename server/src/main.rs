@@ -36,14 +36,18 @@ async fn stats_history(Extension(db): Extension<DbHandle>) -> impl IntoResponse 
         let conn = db.lock().unwrap();
         persistence::recent_stats(&conn, 50)
     })
-    .await
-    .expect("spawn_blocking task panicked");
+    .await;
 
     match rows {
-        Ok(rows) => axum::Json(rows).into_response(),
-        Err(err) => {
+        Ok(Ok(rows)) => axum::Json(rows).into_response(),
+        Ok(Err(err)) => {
             tracing::error!(%err, "failed to read stats history");
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
+        Err(join_err) => {
+            tracing::error!(%join_err, "stats history query task panicked");
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "internal error reading stats history".to_string())
+                .into_response()
         }
     }
 }
@@ -140,7 +144,13 @@ fn spawn_tick_loop(
             if should_persist {
                 let db = Arc::clone(&db);
                 tokio::task::spawn_blocking(move || {
-                    let conn = db.lock().unwrap();
+                    let conn = match db.lock() {
+                        Ok(conn) => conn,
+                        Err(err) => {
+                            tracing::error!(%err, "db mutex poisoned; skipping this persist attempt");
+                            return;
+                        }
+                    };
                     if let Err(err) = persistence::insert_stats(&conn, &stats_row) {
                         tracing::error!(%err, "failed to persist stats row");
                     }
