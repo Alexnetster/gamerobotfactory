@@ -6,6 +6,9 @@ use std::sync::Arc;
 
 const REPATH_INTERVAL: u32 = 10;
 const LEG_CYCLE_SPEED: f32 = 0.1;
+const WEAR_LIMIT_TICKS: u64 = 2000; // 100초 분량의 작업(20Hz 기준) — 튜닝 대상
+const MAX_FAILURE_PROB: f64 = 0.05; // 완전 마모 상태에서의 틱당 최대 고장 확률 — 튜닝 대상
+pub const REPAIR_TICKS: u32 = 100; // 20Hz 기준 5초 — 튜닝 대상. game_state.rs가 RepairRobot 처리 시 이 값을 참조하므로 pub.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BodyPose {
@@ -35,6 +38,17 @@ pub enum Task {
     Placing,
 }
 
+/// 로봇의 동작 가능 여부. `task`(무슨 작업을 하려는 참인지)와는 별개다 —
+/// `task`는 팔 동작만 나타내고 이동은 항상 자동이라, 고장으로 이동까지
+/// 멈추려면 별도 필드가 필요하다. `Repairing` 중에도 `task`는 그대로
+/// 보존되므로 복구가 끝나면 하던 일을 잊지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RobotStatus {
+    Operational,
+    Failed,
+    Repairing { remaining_ticks: u32 },
+}
+
 #[derive(Debug, Clone)]
 pub struct Robot {
     pub id: u32,
@@ -45,6 +59,8 @@ pub struct Robot {
     pub pose: BodyPose,
     pub leg_cycle_progress: f32,
     pub task: Task,
+    pub worn_ticks: u64,
+    pub status: RobotStatus,
 }
 
 impl Robot {
@@ -58,8 +74,64 @@ impl Robot {
             pose: BodyPose::Standing,
             leg_cycle_progress: 0.0,
             task: Task::Idle,
+            worn_ticks: 0,
+            status: RobotStatus::Operational,
         }
     }
+
+    /// 0.0(방금 교체됨) ~ 1.0(완전 마모)의 마모 비율. 고장 확률 계산과
+    /// 프로토콜의 `durability_remaining` 노출 양쪽이 이 함수 하나만
+    /// 쓴다 — 계산식을 두 곳에 복사해두면 `WEAR_LIMIT_TICKS`를 나중에
+    /// 튜닝할 때 한쪽만 고치고 잊어버리는 드리프트가 생기기 쉽다.
+    pub fn wear_ratio(&self) -> f32 {
+        (self.worn_ticks as f32 / WEAR_LIMIT_TICKS as f32).min(1.0)
+    }
+}
+
+/// (robot_id, tick_count)를 섞어 대략 [0.0, 1.0] 구간의 결정적 의사난수를
+/// 낸다(u64 -> f64 변환의 부동소수점 반올림으로 극히 드물게 정확히 1.0이
+/// 나올 수 있음 — `failure_prob`가 최대 `MAX_FAILURE_PROB`=0.05를 넘지
+/// 않으므로 그 경우도 그냥 "고장 아님"으로 정확히 처리되어 문제없다).
+/// splitmix64 파이널라이저를 재사용 — 암호학적 강도는 필요 없고, 입력이
+/// 조금만 달라져도 출력이 크게 달라지는 성질(avalanche)만 있으면 된다.
+/// 상태를 가진 RNG를 안 쓰는 이유: `tick()`이 `rayon`으로 로봇을 병렬
+/// 갱신하며 각 로봇은 스냅샷만 읽는 무공유 모델이라, 상태 있는 RNG를
+/// 넣으면 그 불변식이 깨진다(이 함수는 순수 함수라 안전).
+fn deterministic_roll(robot_id: u32, tick_count: u64) -> f64 {
+    let mut x = (robot_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ tick_count.wrapping_mul(0xBF58476D1CE4E5B9);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+    x ^= x >> 31;
+    (x as f64) / (u64::MAX as f64)
+}
+
+/// 로봇의 마모/고장/복구 상태를 한 틱만큼 전진시킨다. 순수 함수(로봇을
+/// 값으로 받아 값으로 반환) — `plan_robot`이 다른 순수 갱신 단계들과
+/// 나란히 호출한다.
+fn update_status(mut robot: Robot, tick_count: u64) -> Robot {
+    match robot.status {
+        RobotStatus::Operational => {
+            if matches!(robot.task, Task::Picking | Task::Placing) {
+                robot.worn_ticks += 1;
+            }
+            let failure_prob = robot.wear_ratio() as f64 * MAX_FAILURE_PROB;
+            if deterministic_roll(robot.id, tick_count) < failure_prob {
+                robot.status = RobotStatus::Failed;
+            }
+        }
+        RobotStatus::Failed => {
+            // RepairRobot 커맨드(game_state.rs)가 트리거하기 전까지는 가만히 있는다.
+        }
+        RobotStatus::Repairing { remaining_ticks } => {
+            robot.status = if remaining_ticks <= 1 {
+                robot.worn_ticks = 0;
+                RobotStatus::Operational
+            } else {
+                RobotStatus::Repairing { remaining_ticks: remaining_ticks - 1 }
+            };
+        }
+    }
+    robot
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +158,7 @@ pub fn tick(state: &SimState) -> SimState {
     let planned: Vec<Robot> = state
         .robots
         .par_iter()
-        .map(|robot| safe_plan_robot(&state.grid, robot, &occupied))
+        .map(|robot| safe_plan_robot(&state.grid, robot, &occupied, state.tick_count))
         .collect();
 
     let intents: Vec<MoveIntent> = state
@@ -126,8 +198,16 @@ pub fn tick(state: &SimState) -> SimState {
     SimState { grid: state.grid.clone(), robots: new_robots, tick_count: state.tick_count + 1 }
 }
 
-fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
-    let mut next = robot.clone();
+fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64) -> Robot {
+    let mut next = update_status(robot.clone(), tick_count);
+
+    if next.status != RobotStatus::Operational {
+        // Failed/Repairing 로봇은 이동도, 재계획도 하지 않고 제자리에
+        // 얼어붙는다. 다른 로봇들의 A*는 `occupied`(아래 tick() 참고)가
+        // 매 틱 전체 로봇 위치로 다시 계산되므로, 이 로봇은 자동으로
+        // 장애물 취급된다 — 그리드 쪽에 새 코드가 필요 없다.
+        return next;
+    }
 
     if next.pos == next.goal {
         return next;
@@ -159,8 +239,8 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
 
 /// `plan_robot`을 패닉으로부터 격리한다. 패닉이 나면 해당 로봇은 이번
 /// 틱을 그대로 멈춘 채 넘어가고, 나머지 로봇들의 갱신은 영향받지 않는다.
-fn safe_plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>) -> Robot {
-    safe_call(robot, || plan_robot(grid, robot, occupied))
+fn safe_plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64) -> Robot {
+    safe_call(robot, || plan_robot(grid, robot, occupied, tick_count))
 }
 
 /// Runs `f` (a robot's per-tick update) isolated from panics: if it
@@ -314,5 +394,124 @@ mod tests {
     fn new_robot_starts_idle() {
         let robot = Robot::new(1, (0, 0), (0, 0));
         assert_eq!(robot.task, Task::Idle);
+    }
+
+    #[test]
+    fn new_robot_starts_operational_with_no_wear() {
+        let robot = Robot::new(1, (0, 0), (0, 0));
+        assert_eq!(robot.status, RobotStatus::Operational);
+        assert_eq!(robot.worn_ticks, 0);
+    }
+
+    #[test]
+    fn worn_ticks_accumulates_only_while_working() {
+        let idle = update_status(Robot::new(1, (0, 0), (0, 0)), 0);
+        assert_eq!(idle.worn_ticks, 0, "Idle robots should not wear");
+
+        let mut working = Robot::new(2, (0, 0), (0, 0));
+        working.task = Task::Picking;
+        let working = update_status(working, 0);
+        assert_eq!(working.worn_ticks, 1, "a working robot should wear by exactly one tick");
+    }
+
+    #[test]
+    fn repairing_robot_does_not_accumulate_wear() {
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        robot.task = Task::Picking;
+        robot.status = RobotStatus::Repairing { remaining_ticks: 5 };
+        robot.worn_ticks = 10;
+
+        let next = update_status(robot, 0);
+
+        assert_eq!(next.worn_ticks, 10, "wear must not accumulate while repairing");
+    }
+
+    #[test]
+    fn deterministic_roll_is_pure_and_repeatable() {
+        let a = deterministic_roll(7, 1000);
+        let b = deterministic_roll(7, 1000);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn deterministic_roll_stays_within_unit_interval() {
+        for tick in 0..1000u64 {
+            let roll = deterministic_roll(3, tick);
+            assert!((0.0..=1.0).contains(&roll), "roll {roll} out of range at tick {tick}");
+        }
+    }
+
+    #[test]
+    fn deterministic_roll_is_roughly_uniformly_distributed() {
+        let sum: f64 = (0..10_000u64).map(|tick| deterministic_roll(42, tick)).sum();
+        let mean = sum / 10_000.0;
+        assert!((0.4..0.6).contains(&mean), "mean {mean} is far from the expected ~0.5 for a uniform distribution");
+    }
+
+    #[test]
+    fn fully_worn_robot_fails_at_roughly_max_failure_prob_rate() {
+        // worn_ticks를 한계치로 박아두면 wear_ratio()==1.0,
+        // failure_prob==MAX_FAILURE_PROB(0.05)로 고정된다 — 여러
+        // tick_count에 대해 update_status를 반복 호출해 실제로 그 비율
+        // 근처로 고장이 발생하는지 통계적으로 확인한다(정확히 5%일
+        // 필요는 없고 자릿수만 맞으면 됨 — 결정적 해시라 매번 같은 결과).
+        let mut failures = 0u32;
+        let samples = 20_000u64;
+        for tick in 0..samples {
+            let mut robot = Robot::new(1, (0, 0), (0, 0));
+            robot.task = Task::Picking;
+            robot.worn_ticks = WEAR_LIMIT_TICKS;
+            let next = update_status(robot, tick);
+            if next.status == RobotStatus::Failed {
+                failures += 1;
+            }
+        }
+        let rate = failures as f64 / samples as f64;
+        assert!((0.03..0.07).contains(&rate), "expected a failure rate near 0.05, got {rate}");
+    }
+
+    #[test]
+    fn failed_robot_does_not_move_even_toward_an_unreached_goal() {
+        let mut state = simple_state(5, 1);
+        let mut robot = Robot::new(1, (0, 0), (3, 0));
+        robot.status = RobotStatus::Failed;
+        state.robots.push(robot);
+
+        let next = tick(&state);
+
+        assert_eq!(next.robots[0].pos, (0, 0), "a Failed robot must not move");
+    }
+
+    #[test]
+    fn failed_robot_blocks_the_cell_for_other_robots() {
+        let mut blocker = Robot::new(1, (1, 0), (2, 0)); // would move toward (2,0) if operational
+        blocker.status = RobotStatus::Failed;
+        let mover = Robot::new(2, (0, 0), (2, 0)); // only path to its goal runs through (1,0)
+        let mut state = simple_state(3, 1);
+        state.robots.push(blocker);
+        state.robots.push(mover);
+
+        let next = tick(&state);
+
+        let blocker_after = next.robots.iter().find(|r| r.id == 1).unwrap();
+        let mover_after = next.robots.iter().find(|r| r.id == 2).unwrap();
+        assert_eq!(blocker_after.pos, (1, 0), "a Failed robot must never move");
+        assert_eq!(mover_after.pos, (0, 0), "the mover cannot advance into the Failed robot's cell, its only path forward");
+    }
+
+    #[test]
+    fn repairing_robot_counts_down_and_returns_to_operational() {
+        let mut state = simple_state(3, 1);
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        robot.status = RobotStatus::Repairing { remaining_ticks: 2 };
+        robot.worn_ticks = 500;
+        state.robots.push(robot);
+
+        let after_one = tick(&state);
+        assert_eq!(after_one.robots[0].status, RobotStatus::Repairing { remaining_ticks: 1 });
+
+        let after_two = tick(&after_one);
+        assert_eq!(after_two.robots[0].status, RobotStatus::Operational);
+        assert_eq!(after_two.robots[0].worn_ticks, 0, "worn_ticks should reset to 0 once repair completes");
     }
 }
