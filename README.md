@@ -2,7 +2,9 @@
 
 4족 보행 로봇이 공장 컨베이어 라인을 돌며 작업을 돕는 팩토리 시뮬레이션. **백엔드/서버 설계 역량을 보여주는 포트폴리오 프로젝트**로, 게임성은 2차 목표다 — 결정적 시뮬레이션 코어, WebSocket 델타 동기화 프로토콜, 동시성 안전한 틱 루프가 이 프로젝트의 실제 핵심이다.
 
-전체 설계 배경과 트레이드오프는 [`docs/robot-arm-conveyor-game-design.md`](docs/robot-arm-conveyor-game-design.md)에, 지금까지 뭘 만들었고 뭐가 남았는지는 [`docs/KANBAN.md`](docs/KANBAN.md)에 있다.
+전체 설계 배경과 트레이드오프는 [`docs/robot-arm-conveyor-game-design.md`](docs/robot-arm-conveyor-game-design.md)에 있다.
+
+**이어서 작업할 때는 이 문서 대신 [`docs/KANBAN.md`](docs/KANBAN.md)부터 봐야 한다** — 완료/진행/남은 작업이 커밋 SHA와 함께 정리돼 있고, "다음 카드"가 뭔지도 거기 나와 있다. 이 README는 외부 공개용 요약이라 최신 작업 상태 추적용으로는 KANBAN.md보다 부정확하다.
 
 ## 핵심 엔지니어링 결정
 
