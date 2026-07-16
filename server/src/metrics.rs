@@ -28,6 +28,12 @@ pub struct Metrics {
     /// (Prometheus 베이스 단위 컨벤션)를 쓴다. 버킷 경계는 10ms 목표를 중심으로
     /// 그 아래/위 양쪽에 여유를 둬서 p99가 실제로 분해 가능하도록 잡았다.
     pub tick_duration_seconds: Histogram,
+    /// 로봇이 Operational -> Failed로 전이할 때마다 증가 — 로봇 도메인
+    /// 장애가 인프라 장애(tick_panics_total)와 같은 방식으로 관측
+    /// 가능해지도록 하는 지표.
+    pub robot_failures_total: IntCounter,
+    /// 매 틱, 현재 Repairing 상태인 로봇 수로 갱신되는 게이지.
+    pub robots_repairing: IntGauge,
 }
 
 impl Metrics {
@@ -38,25 +44,25 @@ impl Metrics {
             "Total simulation ticks processed",
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 7 names are distinct and validly formed");
         let connected_clients = register_int_gauge_with_registry!(
             "gamerobotfactory_connected_clients",
             "Currently connected WebSocket clients",
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 7 names are distinct and validly formed");
         let robot_count = register_int_gauge_with_registry!(
             "gamerobotfactory_robot_count",
             "Current number of robots in the simulation",
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 7 names are distinct and validly formed");
         let tick_panics_total = register_int_counter_with_registry!(
             "gamerobotfactory_tick_panics_total",
             "Total number of ticks where sim_core::sim::tick panicked and was skipped",
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 7 names are distinct and validly formed");
         let tick_duration_seconds = register_histogram_with_registry!(
             HistogramOpts::new("gamerobotfactory_tick_duration_seconds", "Time spent processing a single simulation tick, in seconds")
                 .buckets(vec![
@@ -64,9 +70,30 @@ impl Metrics {
                 ]),
             registry
         )
-        .expect("registration only fails on a duplicate/invalid metric name; these 5 names are distinct and validly formed");
+        .expect("registration only fails on a duplicate/invalid metric name; these 7 names are distinct and validly formed");
+        let robot_failures_total = register_int_counter_with_registry!(
+            "gamerobotfactory_robot_failures_total",
+            "Total number of robot Operational -> Failed transitions",
+            registry
+        )
+        .expect("registration only fails on a duplicate/invalid metric name; these 7 names are distinct and validly formed");
+        let robots_repairing = register_int_gauge_with_registry!(
+            "gamerobotfactory_robots_repairing",
+            "Current number of robots in the Repairing state",
+            registry
+        )
+        .expect("registration only fails on a duplicate/invalid metric name; these 7 names are distinct and validly formed");
 
-        Metrics { registry, ticks_total, connected_clients, robot_count, tick_panics_total, tick_duration_seconds }
+        Metrics {
+            registry,
+            ticks_total,
+            connected_clients,
+            robot_count,
+            tick_panics_total,
+            tick_duration_seconds,
+            robot_failures_total,
+            robots_repairing,
+        }
     }
 
     pub fn encode(&self) -> (String, Vec<u8>) {
@@ -108,6 +135,8 @@ mod tests {
         assert!(text.contains("gamerobotfactory_robot_count"));
         assert!(text.contains("gamerobotfactory_tick_panics_total"));
         assert!(text.contains("gamerobotfactory_tick_duration_seconds"));
+        assert!(text.contains("gamerobotfactory_robot_failures_total"));
+        assert!(text.contains("gamerobotfactory_robots_repairing"));
     }
 
     #[test]
@@ -133,5 +162,16 @@ mod tests {
         let text = String::from_utf8(body).unwrap();
         assert!(text.contains("gamerobotfactory_tick_duration_seconds_count 2"));
         assert!(text.contains("gamerobotfactory_tick_duration_seconds_sum 0.006"));
+    }
+
+    #[test]
+    fn robot_failure_metrics_are_registered_and_reflect_updates() {
+        let metrics = Metrics::new();
+        metrics.robot_failures_total.inc();
+        metrics.robots_repairing.set(2);
+        let (_, body) = metrics.encode();
+        let text = String::from_utf8(body).unwrap();
+        assert!(text.contains("gamerobotfactory_robot_failures_total 1"));
+        assert!(text.contains("gamerobotfactory_robots_repairing 2"));
     }
 }
