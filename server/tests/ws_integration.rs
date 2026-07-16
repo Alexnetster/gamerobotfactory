@@ -122,31 +122,22 @@ async fn invalid_command_does_not_crash_the_connection() {
     assert!(still_connected, "connection should survive an invalid command");
 }
 
-#[tokio::test]
-async fn lagged_client_resyncs_instead_of_disconnecting() {
-    let server = spawn_server();
-
-    let url = format!("ws://127.0.0.1:{}/ws", server.port);
-    let (ws_stream, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .expect("failed to connect to ws endpoint");
-    let (_write, mut read) = ws_stream.split();
-
-    let _first = read.next().await.expect("stream ended early");
-
-    // 브로드캐스트 채널 용량(32)을 넘기도록 충분히 오래 읽지 않는다.
-    // 20Hz(50ms) 기준 32개 버퍼 ≈ 1.6초 — 3초 넘게 기다리면 확실히 넘친다.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    let mut still_receiving = false;
-    for _ in 0..10 {
-        match tokio::time::timeout(Duration::from_millis(500), read.next()).await {
-            Ok(Some(Ok(_))) => {
-                still_receiving = true;
-                break;
-            }
-            _ => continue,
-        }
-    }
-    assert!(still_receiving, "connection should survive a lag/resync event, not be dropped");
-}
+// NOTE: an earlier version of this file had a black-box
+// `lagged_client_resyncs_instead_of_disconnecting` test here that simply
+// stopped reading the client socket for 3+ seconds and then asserted the
+// connection was still alive. Code review (mutation testing: replacing the
+// `Lagged` arm in `handle_socket` with a bare `break`) proved that test
+// vacuous — it passed identically whether or not the resync behavior
+// existed. Root cause: `tokio::sync::broadcast`'s buffer only overflows
+// when the *server's* receiving task falls behind, which happens only if
+// `socket.send()` blocks on a full OS send buffer. A client merely pausing
+// its application-level reads doesn't do that — the OS keeps acking and
+// buffering at the TCP layer far beyond what a few seconds of 20Hz deltas
+// (~100-150 bytes each) can fill, so `Lagged` never actually fired in that
+// test, in either the intact or the broken build.
+//
+// The real, deterministic coverage for the lag/resync path now lives as
+// unit tests next to the code in `server/src/ws.rs`
+// (`decide_broadcast_update`'s test module), which drives a real
+// `tokio::sync::broadcast` channel past its capacity directly — no OS
+// socket or wall-clock guessing involved.

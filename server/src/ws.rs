@@ -117,14 +117,13 @@ async fn handle_socket(
                 }
             }
             update = updates.recv() => {
-                match update {
-                    Ok(message) => {
+                match decide_broadcast_update(update) {
+                    BroadcastUpdate::Forward(message) => {
                         if send_message(&mut socket, &message).await.is_err() {
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(missed_messages = n, "client lagged behind; resyncing with a full snapshot");
+                    BroadcastUpdate::Resync => {
                         let snapshot = {
                             let guard = state.lock().await;
                             to_snapshot(&guard, own_session_id)
@@ -133,10 +132,44 @@ async fn handle_socket(
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    BroadcastUpdate::Close => break,
                 }
             }
         }
+    }
+}
+
+/// What `handle_socket` should do in response to a single receive from the
+/// per-connection broadcast subscriber. Pulled out of the `select!` arm so
+/// the decision itself — forward / resync / close — can be unit-tested
+/// against a real `tokio::sync::broadcast` channel without needing an
+/// actual OS socket to fall behind (which, on a real TCP loopback
+/// connection, effectively never happens within a normal test's
+/// wall-clock budget: the OS send buffer is many times larger than what a
+/// few seconds of 20Hz deltas produce, so `socket.send()` never blocks and
+/// `updates.recv()` is never starved — see the code review that caught
+/// this and led to this refactor).
+#[derive(Debug, PartialEq)]
+enum BroadcastUpdate {
+    /// Forward this message to the client as-is.
+    Forward(ServerMessage),
+    /// The client fell behind the broadcast channel's buffer; resync with
+    /// a fresh full snapshot instead of trying to replay what it missed.
+    Resync,
+    /// The broadcast channel itself is closed; end the connection.
+    Close,
+}
+
+fn decide_broadcast_update(
+    result: Result<ServerMessage, tokio::sync::broadcast::error::RecvError>,
+) -> BroadcastUpdate {
+    match result {
+        Ok(message) => BroadcastUpdate::Forward(message),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+            tracing::warn!(missed_messages = n, "client lagged behind; resyncing with a full snapshot");
+            BroadcastUpdate::Resync
+        }
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => BroadcastUpdate::Close,
     }
 }
 
@@ -166,4 +199,53 @@ fn apply_command(state: &mut GameState, command: ClientCommand) {
 async fn send_message(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), axum::Error> {
     let text = serde_json::to_string(message).expect("ServerMessage always serializes");
     socket.send(Message::Text(text)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::broadcast;
+
+    fn sample_message(tick: u64) -> ServerMessage {
+        ServerMessage::Delta { v: 1, tick, conveyor: None, changed_robots: vec![], removed_robot_ids: vec![] }
+    }
+
+    #[test]
+    fn ok_message_is_forwarded_unchanged() {
+        let message = sample_message(1);
+        let decision = decide_broadcast_update(Ok(message.clone()));
+        assert_eq!(decision, BroadcastUpdate::Forward(message));
+    }
+
+    #[test]
+    fn closed_channel_ends_the_connection() {
+        let decision = decide_broadcast_update(Err(broadcast::error::RecvError::Closed));
+        assert_eq!(decision, BroadcastUpdate::Close);
+    }
+
+    /// This is the deterministic replacement for the wall-clock integration
+    /// test: instead of hoping a real OS socket falls behind within a few
+    /// seconds (it doesn't — see `decide_broadcast_update`'s doc comment),
+    /// we drive a real `tokio::sync::broadcast` channel past its capacity
+    /// directly and feed the genuine `RecvError::Lagged` it produces into
+    /// the function under test.
+    #[tokio::test]
+    async fn real_lagged_broadcast_error_produces_a_resync_decision() {
+        let (tx, mut rx) = broadcast::channel(32);
+
+        // Send well past the channel's capacity without ever calling
+        // `recv`, so the subscriber is guaranteed to have lagged.
+        for tick in 0..40u64 {
+            tx.send(sample_message(tick)).expect("at least one receiver is still subscribed");
+        }
+
+        let result = rx.recv().await;
+        assert!(
+            matches!(result, Err(broadcast::error::RecvError::Lagged(_))),
+            "expected the receiver to report Lagged after overflowing the channel, got {result:?}"
+        );
+
+        let decision = decide_broadcast_update(result);
+        assert_eq!(decision, BroadcastUpdate::Resync, "a lagged receiver must resync, not close or silently forward");
+    }
 }
