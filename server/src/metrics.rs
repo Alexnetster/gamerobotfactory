@@ -1,12 +1,6 @@
-//! Prometheus metrics registry and `/metrics` encoder. Deliberately not wired
-//! into `main.rs`'s tick loop yet — Task 7 in this plan will call into
-//! `Metrics` (via `Extension<MetricsHandle>`) from the tick loop and route
-//! table. This module is complete and tested on its own first, matching the
-//! same write-then-wire-later pattern used for `session.rs`/`persistence.rs`/
-//! `config.rs` (see those modules' history for the precedent): the dead-code
-//! lint is suppressed here rather than forcing premature wiring just to
-//! satisfy clippy.
-#![allow(dead_code)]
+//! Prometheus metrics registry and `/metrics` encoder. Wired into `main.rs`'s
+//! tick loop and route table, and into `ws.rs`'s connection lifecycle (via
+//! `Extension<MetricsHandle>`).
 
 use axum::extract::Extension;
 use axum::response::IntoResponse;

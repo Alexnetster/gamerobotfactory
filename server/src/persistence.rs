@@ -1,12 +1,7 @@
-//! SQLite persistence for production/uptime stats history. Deliberately not
-//! wired into `main.rs` yet — later tasks in this plan will call into this
-//! module from the tick loop (wrapped in `tokio::task::spawn_blocking` so the
-//! synchronous rusqlite calls don't block the async runtime). This module is
-//! complete and tested on its own first, matching the same
-//! write-then-wire-later pattern used for `session.rs` (see that module's
-//! history for the precedent): the dead-code lint is suppressed here rather
-//! than forcing premature wiring just to satisfy clippy.
-#![allow(dead_code)]
+//! SQLite persistence for production/uptime stats history. Wired into
+//! `main.rs`'s tick loop, which calls into this module from inside
+//! `tokio::task::spawn_blocking` so the synchronous rusqlite calls don't
+//! block the async runtime.
 
 use rusqlite::{params, Connection, Result};
 use serde::Serialize;

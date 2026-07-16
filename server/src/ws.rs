@@ -10,16 +10,48 @@ pub type SharedState = Arc<Mutex<GameState>>;
 pub type Broadcaster = tokio::sync::broadcast::Sender<crate::protocol::ServerMessage>;
 pub type SessionHandle = Arc<Mutex<crate::session::SessionRegistry>>;
 
+/// Ties the `connected_clients` gauge's lifetime to this connection's scope.
+/// `handle_socket` has several exit points (an early `return` after a failed
+/// initial snapshot send, and several `break`s inside the `tokio::select!`
+/// loop for socket errors, normal close, and a closed broadcast channel).
+/// Manually pairing `inc`/`dec` at each of those would silently leak the
+/// gauge upward forever if any one of them were missed (flagged in Task 5's
+/// code review) — RAII makes that impossible by construction, since `Drop`
+/// runs no matter which path out of the function is taken, panics included.
+struct ConnectionGuard<'a> {
+    counter: &'a prometheus::IntGauge,
+}
+
+impl<'a> ConnectionGuard<'a> {
+    fn new(counter: &'a prometheus::IntGauge) -> Self {
+        counter.inc();
+        ConnectionGuard { counter }
+    }
+}
+
+impl<'a> Drop for ConnectionGuard<'a> {
+    fn drop(&mut self) {
+        self.counter.dec();
+    }
+}
+
 pub async fn ws_route(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
     axum::extract::Extension(broadcaster): axum::extract::Extension<Broadcaster>,
     axum::extract::Extension(sessions): axum::extract::Extension<SessionHandle>,
+    axum::extract::Extension(metrics): axum::extract::Extension<crate::metrics::MetricsHandle>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, broadcaster, sessions))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, broadcaster, sessions, metrics))
 }
 
-async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: Broadcaster, sessions: SessionHandle) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: SharedState,
+    broadcaster: Broadcaster,
+    sessions: SessionHandle,
+    metrics: crate::metrics::MetricsHandle,
+) {
     // 구독을 스냅샷 전송보다 먼저 시작한다 — 스냅샷 전송은 소켓 I/O라
     // await 지점에서 양보(yield)할 수 있고, 그 사이에 틱 루프가
     // 브로드캐스트를 하나 흘리면 그 델타는 이 커넥션에 영원히 유실된다
@@ -31,6 +63,8 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, broadcaster: B
         let mut registry = sessions.lock().await;
         registry.start_session(std::time::Instant::now())
     };
+
+    let _connection_guard = ConnectionGuard::new(&metrics.connected_clients);
 
     {
         let snapshot = {

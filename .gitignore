@@ -16,6 +16,11 @@ target
 # Claude Code worktrees (subagent-driven-development / executing-plans)
 .worktrees/
 
+# Default sqlite db for the server binary (GAMEROBOTFACTORY_DB_PATH env var
+# overrides this; tests set it to an isolated temp path, but a plain
+# `cargo run`/`cargo test` without that env var writes here).
+gamerobotfactory.sqlite3
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

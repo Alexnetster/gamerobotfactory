@@ -1,12 +1,6 @@
-//! Runtime configuration exposed via `GET`/`POST /api/config`. Deliberately
-//! not wired into `main.rs`'s router yet — that wiring (and the tick loop
-//! actually reading `persist_every_n_ticks` to decide when to call into
-//! `persistence.rs`) happens in a later task in this plan. This module is
-//! complete and tested on its own first, matching the same
-//! write-then-wire-later pattern used for `session.rs`/`persistence.rs`: the
-//! dead-code lint is suppressed here rather than forcing premature wiring
-//! just to satisfy clippy.
-#![allow(dead_code)]
+//! Runtime configuration exposed via `GET`/`POST /api/config`. Wired into
+//! `main.rs`'s router; the tick loop reads `persist_every_n_ticks` from here
+//! each tick to decide when to call into `persistence.rs`.
 
 use axum::extract::Extension;
 use axum::http::StatusCode;
