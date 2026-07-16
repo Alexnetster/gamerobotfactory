@@ -45,12 +45,14 @@
 설계문서(line 101)가 요구하는 "틱 처리 시간 p99 < 10ms" 목표를 측정할 수단이 없었던 갭을 상태 점검 중 발견해 별도 태스크로 처리.
 - **완료** — `gamerobotfactory_tick_duration_seconds` Prometheus 히스토그램 추가 (`1d978fd`) — `state.lock()` 획득부터 스냅샷/델타 계산까지(브로드캐스트 전송·비동기 영속화 디스패치는 제외)의 실제 소요시간을 매 틱 측정. 10ms(p99 목표)와 50ms(20Hz 틱 예산)를 정확히 버킷 경계로 포함해 `histogram_quantile`로 바로 조회 가능. 구현자·리뷰어 모두 `.observe()` 호출을 제거해도 REST 통합테스트가 통과하는지 뮤테이션 테스트로 확인(둘 다 실제로 실패 → 되돌리면 통과, 85/85 통과, clippy 경고 0개).
 
-## Backlog
+## In Progress
 
-### 로봇 내구도/고장/복구 (설계 완료, 구현 대기)
-사용시간 누적 → 고장 확률 증가 → 오퍼레이터가 부품 교체(복구) → 장애 감지+조치 프로세스를 로봇 도메인에도 적용하자는 아이디어(브레인스토밍 2026-07-16).
-- **설계 완료** — `docs/superpowers/specs/2026-07-16-robot-durability-failure-design.md` (`ba148eb`) — 단일 내구도 값, `(robot_id, tick_count)` 시드 결정적 해시로 병렬 틱과 공존하는 고장 판정, 별도 `status` 필드(기존 `task`와 분리), `RepairRobot` 커맨드, `robot_failures_total`/`robots_repairing` 메트릭, `robot_failure_events` SQLite 테이블.
-- **완결성 리뷰 + 갭 수정 완료** (`740d280`) — 독립 리뷰어가 스펙을 코드베이스와 대조 검증. High 2건 실질 발견: (1) `durability_remaining`을 원값 그대로 노출하면 델타 압축(이 프로토콜의 핵심 셀링포인트)이 작업 중인 로봇마다 무력화됨 → 5% 단위 반올림으로 해결(단, `Repairing`의 실시간 카운트다운은 의도적으로 반올림 안 함, 진행률 표시 목적+짧은 지속시간이라 비용 무시 가능). (2) 테스트 전략이 "자연 마모로 확률적 고장을 기다리는" 플레이키 테스트 함정을 명시적으로 막지 못함 → Task 8 사례처럼 되지 않도록 결정적 시딩 방식을 테스트 전략에 명문화. 그 외 Medium/Low: 마모율 계산 중복(→ `wear_ratio()` 단일 소스로 통합), 상태전이 위치 서술 오류(Failed→Repairing은 tick() 밖 ws.rs에서 일어남) 수정, `SetRobotCount`+고장/복구중 로봇 처리 방침 명문화, `selected_robot` 영향 없음 명시, 라인 인용 오탈자 수정. **사용자 스펙 리뷰 승인 대기 중** — 승인되면 writing-plans로 구현 계획 작성.
+### 로봇 내구도/고장/복구 (`docs/superpowers/plans/2026-07-16-robot-durability-failure-plan.md`)
+사용시간 누적 → 고장 확률 증가 → 오퍼레이터가 부품 교체(복구) → 장애 감지+조치 프로세스를 로봇 도메인에도 적용하자는 아이디어(브레인스토밍 2026-07-16). 설계 완료(`docs/superpowers/specs/2026-07-16-robot-durability-failure-design.md`, `ba148eb`, 완결성 리뷰 갭 수정 `740d280` — 델타 압축 회귀 방지용 내구도 5% 반올림, 플레이키 테스트 함정 방지용 결정적 시딩 테스트 전략 등), 구현 계획 작성 완료(`cf72051`). 9개 태스크: (1)~~sim_core RobotStatus/마모/결정적 고장/이동정지~~ ✅, (2)game_state.rs 커맨드 검증+RepairRobot, (3)protocol.rs+delta.rs 와이어 프로토콜, (4)ws.rs 배선+통합테스트, (5)metrics.rs, (6)persistence.rs, (7)main.rs 전이감지+배선+REST, (8)tick_properties.rs 결정성 proptest, (9)전체 검증+문서 갱신.
+
+- **Task 1 완료** — `sim_core`에 `RobotStatus`(Operational/Failed/Repairing) + `worn_ticks` + `wear_ratio()` + `(robot_id, tick_count)` 시드 결정적 해시 고장 판정 + 이동 정지 (`e0a16fc`, 코드 품질 리뷰 수정 `947afd6`) — 기존 `occupied` 스냅샷 메커니즘이 고장난 로봇을 별도 코드 없이 자동으로 장애물 취급하는 것을 활용. **코드 품질 리뷰에서 뮤테이션 테스트로 잡아낸 실질 문제**: 최초의 "고장난 로봇이 장애물 역할을 하는지" 테스트는 한 틱만 확인해서, Failed 여부와 무관하게 이미 존재하던 "한 틱짜리 점유 스냅샷" 규칙만으로도 통과해버리는 공허한 검증이었음(Task 8의 Lagged 사례와 같은 패턴). 목표 로봇을 향해 이동해야 할 로봇을 고장 상태로 만들고 10틱 반복 검증하는 방식으로 재작성 — 리뷰어가 직접 이동정지 게이트를 무력화해서 mover 쪽 단언만 분리해도 실패하는 것까지 확인(정상이라면 그 지점에서 고장 로봇이 비켜서 mover가 전진했을 것이므로). 45/45(lib) 통과, clippy 경고 0개.
+
+## Backlog
 
 ### Plan 4~5 (아직 계획 문서 없음, 설계문서 로드맵만 있음)
 - **Plan 4** — 클라이언트 렌더링 (`client/` 디렉토리 자체가 아직 없음 — Vite+TS+Canvas, 아이소메트릭 투영)
@@ -69,6 +71,6 @@
 
 ## 현재 건강도 스냅샷
 
-- `cargo test --manifest-path server/Cargo.toml`: 85/85 통과
+- `cargo test --manifest-path server/Cargo.toml`: 95/95 통과 (진행 중인 로봇 내구도 기능 Task 1 반영, 총계는 태스크가 진행되며 계속 늘어남)
 - `cargo clippy --all-targets`: 경고 0개
 - `vitest`: 해당 없음 (`client/` 없음)
