@@ -129,6 +129,26 @@ async fn stats_history_reflects_persisted_rows_after_running() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+/// Prometheus 텍스트 포맷에서 `metric_name value` 형태의 한 줄을 찾아 값을
+/// `i64`로 파싱한다. 단순히 이름이 텍스트에 등장하는지만 보면 카운터가
+/// 실제로 증가했는지는 검증하지 못한다 — 레지스트리에 등록만 되어 있으면
+/// 틱이 한 번도 안 돌아도 이름은 항상 출력에 나타나기 때문이다
+/// (`metrics.rs`의 `fresh_metrics_encode_without_error_and_include_registered_names`
+/// 테스트가 이미 그 사실을 증명한다). 그래서 이 헬퍼로 실제 숫자 값을 뽑아
+/// `> 0`을 단언해야 틱 루프가 이 카운터를 실제로 증가시키고 있다는 것까지
+/// 검증한 게 된다.
+fn parse_metric_value(body: &str, metric_name: &str) -> i64 {
+    let prefix = format!("{metric_name} ");
+    body.lines()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("metric line for {metric_name} not found in body:\n{body}"))
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_else(|| panic!("metric line for {metric_name} had no value token"))
+        .parse()
+        .unwrap_or_else(|err| panic!("metric value for {metric_name} was not an integer: {err}"))
+}
+
 #[tokio::test]
 async fn metrics_endpoint_exposes_prometheus_text_with_tick_counter() {
     let db_path = temp_db_path("metrics");
@@ -136,13 +156,23 @@ async fn metrics_endpoint_exposes_prometheus_text_with_tick_counter() {
     let base = format!("http://127.0.0.1:{}", server.port);
     let client = reqwest::Client::new();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // 20Hz(50ms/tick) 기준 400ms면 ~8틱 — 200ms(~4틱)보다 여유를 둬서
+    // 스케줄링 지연으로 인한 flake 가능성을 줄인다.
+    tokio::time::sleep(Duration::from_millis(400)).await;
 
     let response = client.get(format!("{base}/metrics")).send().await.expect("GET /metrics failed");
     assert!(response.status().is_success());
     let body = response.text().await.expect("failed to read metrics body");
-    assert!(body.contains("gamerobotfactory_ticks_total"));
+
+    // robot_count는 값 자체가 아니라 지표가 노출되는지만 확인한다 — 로봇 수는
+    // 0이 정상값일 수 있는 게이지라 값 검증 대상이 아니다.
     assert!(body.contains("gamerobotfactory_robot_count"));
+
+    // ticks_total은 실제로 값이 0보다 큰지까지 확인해서, 틱 루프가 이 카운터를
+    // 정말로 증가시키고 있다는 것을 검증한다(이름만 등장하는지 보는 것보다
+    // 강한 단언).
+    let ticks_total = parse_metric_value(&body, "gamerobotfactory_ticks_total");
+    assert!(ticks_total > 0, "expected gamerobotfactory_ticks_total to have advanced past 0, got {ticks_total}");
 
     let _ = std::fs::remove_file(&db_path);
 }
