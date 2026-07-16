@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use proptest::sample::subsequence;
 use sim_core::grid::{CellId, Grid};
-use sim_core::sim::{tick, Robot, SimState};
+use sim_core::sim::{tick, Robot, RobotStatus, SimState};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -36,6 +36,37 @@ fn arbitrary_sim_state() -> impl Strategy<Value = SimState> {
     })
 }
 
+/// 일부 로봇을 `Failed`/`Repairing`(제자리에 얼어붙은 장애물)로 시딩한다
+/// — 이 기능이 도입한 "영구적으로 안 움직이는 로봇" 시나리오에서도
+/// 충돌 없음/결정성이 유지되는지 검증하기 위함.
+fn frozen_statuses() -> impl Strategy<Value = Vec<RobotStatus>> {
+    proptest::collection::vec(
+        prop_oneof![
+            Just(RobotStatus::Operational),
+            Just(RobotStatus::Failed),
+            (1u32..=50).prop_map(|remaining_ticks| RobotStatus::Repairing { remaining_ticks }),
+        ],
+        ROBOT_COUNT,
+    )
+}
+
+fn arbitrary_sim_state_with_some_frozen_robots() -> impl Strategy<Value = SimState> {
+    (distinct_starts(), goals(), frozen_statuses()).prop_map(|(starts, goals, statuses)| {
+        let robots: Vec<Robot> = starts
+            .into_iter()
+            .zip(goals)
+            .zip(statuses)
+            .enumerate()
+            .map(|(i, ((pos, goal), status))| {
+                let mut robot = Robot::new(i as u32, pos, goal);
+                robot.status = status;
+                robot
+            })
+            .collect();
+        SimState { grid: Arc::new(Grid::new(SIZE, SIZE)), robots, tick_count: 0 }
+    })
+}
+
 proptest! {
     /// 서로 다른 칸에서 시작한 N대의 로봇은, 한 틱을 진행한 뒤에도 서로
     /// 다른 칸에 있어야 한다. `tick`의 계획은 틱 시작 시점의 점유 스냅샷을
@@ -61,5 +92,58 @@ proptest! {
         let positions_a: Vec<CellId> = tick(&state).robots.iter().map(|r| r.pos).collect();
         let positions_b: Vec<CellId> = tick(&state).robots.iter().map(|r| r.pos).collect();
         prop_assert_eq!(positions_a, positions_b);
+    }
+
+    /// Failed/Repairing 로봇이 섞여 있어도 충돌 방지 불변식이 유지된다.
+    #[test]
+    fn tick_never_produces_collisions_with_frozen_robots(state in arbitrary_sim_state_with_some_frozen_robots()) {
+        let next = tick(&state);
+
+        let mut seen = HashSet::new();
+        for robot in &next.robots {
+            prop_assert!(seen.insert(robot.pos), "duplicate position after tick: {:?}", robot.pos);
+        }
+    }
+
+    /// Failed/Repairing 로봇이 섞여 있어도(마모/고장 로직이 결정적 해시를
+    /// 쓰므로) tick()은 여전히 순수 함수여야 한다.
+    #[test]
+    fn tick_is_deterministic_with_frozen_robots(state in arbitrary_sim_state_with_some_frozen_robots()) {
+        let a: Vec<(CellId, RobotStatus)> = tick(&state).robots.iter().map(|r| (r.pos, r.status)).collect();
+        let b: Vec<(CellId, RobotStatus)> = tick(&state).robots.iter().map(|r| (r.pos, r.status)).collect();
+        prop_assert_eq!(a, b);
+    }
+
+    /// Failed로, 또는 Repairing으로(단 이번 틱에 복구가 끝나지 않는
+    /// `remaining_ticks > 1` 조건으로) 시딩된 로봇은 한 틱이 지나도 원래
+    /// 칸에 그대로 있어야 한다 — Task 1의 예시 기반 단위테스트를 임의의
+    /// 그리드/로봇 배치로 넓게 재확인한다.
+    ///
+    /// `remaining_ticks == 1`은 일부러 제외한다: `plan_robot`은
+    /// `update_status`를 먼저 실행해 상태를 갱신한 *뒤에* "Operational이
+    /// 아니면 얼어붙는다"를 검사하므로(server/src/sim.rs), 복구가 이번
+    /// 틱에 끝나는 로봇(remaining_ticks: 1 -> Operational)은 같은 틱 안에서
+    /// 바로 이동까지 재개할 수 있다 — 이는 실제로 관찰된 동작이며(하던
+    /// 작업을 복구 완료 후 잊지 않는다는 설계 의도와 일치), 버그가
+    /// 아니라 이 프로퍼티가 적용되는 대상에서 제외해야 할 경우다.
+    #[test]
+    fn frozen_robots_never_move(state in arbitrary_sim_state_with_some_frozen_robots()) {
+        let frozen_positions: std::collections::HashMap<u32, CellId> = state
+            .robots
+            .iter()
+            .filter(|r| {
+                matches!(r.status, RobotStatus::Failed)
+                    || matches!(r.status, RobotStatus::Repairing { remaining_ticks } if remaining_ticks > 1)
+            })
+            .map(|r| (r.id, r.pos))
+            .collect();
+
+        let next = tick(&state);
+
+        for robot in &next.robots {
+            if let Some(&original_pos) = frozen_positions.get(&robot.id) {
+                prop_assert_eq!(robot.pos, original_pos, "a non-Operational robot must not move");
+            }
+        }
     }
 }

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f4470ea2cb8bb433a4fe1e3063d9619e5d89376ff0d9b25ad23bf5f49b6c0449 # shrinks to state = SimState { grid: Grid { width: 8, height: 8, walls: {} }, robots: [Robot { id: 0, pos: (3, 0), goal: (0, 0), path: [], ticks_until_repath: 0, pose: Standing, leg_cycle_progress: 0.0, task: Idle, worn_ticks: 0, status: Repairing { remaining_ticks: 1 } }, Robot { id: 1, pos: (3, 3), goal: (0, 0), path: [], ticks_until_repath: 0, pose: Standing, leg_cycle_progress: 0.0, task: Idle, worn_ticks: 0, status: Operational }, Robot { id: 2, pos: (3, 5), goal: (0, 0), path: [], ticks_until_repath: 0, pose: Standing, leg_cycle_progress: 0.0, task: Idle, worn_ticks: 0, status: Operational }, Robot { id: 3, pos: (3, 6), goal: (0, 0), path: [], ticks_until_repath: 0, pose: Standing, leg_cycle_progress: 0.0, task: Idle, worn_ticks: 0, status: Operational }, Robot { id: 4, pos: (5, 0), goal: (0, 0), path: [], ticks_until_repath: 0, pose: Standing, leg_cycle_progress: 0.0, task: Idle, worn_ticks: 0, status: Operational }], tick_count: 0 }
