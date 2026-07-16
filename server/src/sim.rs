@@ -8,7 +8,7 @@ const REPATH_INTERVAL: u32 = 10;
 const LEG_CYCLE_SPEED: f32 = 0.1;
 const WEAR_LIMIT_TICKS: u64 = 2000; // 100초 분량의 작업(20Hz 기준) — 튜닝 대상
 const MAX_FAILURE_PROB: f64 = 0.05; // 완전 마모 상태에서의 틱당 최대 고장 확률 — 튜닝 대상
-pub const REPAIR_TICKS: u32 = 100; // 20Hz 기준 5초 — 튜닝 대상. game_state.rs가 RepairRobot 처리 시 이 값을 참조하므로 pub.
+pub const REPAIR_TICKS: u32 = 100; // 20Hz 기준 5초 — 튜닝 대상. 나중 태스크의 game_state.rs::repair_robot이 RepairRobot 처리 시 이 값을 참조할 예정이라 pub.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BodyPose {
@@ -80,9 +80,10 @@ impl Robot {
     }
 
     /// 0.0(방금 교체됨) ~ 1.0(완전 마모)의 마모 비율. 고장 확률 계산과
-    /// 프로토콜의 `durability_remaining` 노출 양쪽이 이 함수 하나만
-    /// 쓴다 — 계산식을 두 곳에 복사해두면 `WEAR_LIMIT_TICKS`를 나중에
-    /// 튜닝할 때 한쪽만 고치고 잊어버리는 드리프트가 생기기 쉽다.
+    /// (나중 태스크에서 배선될) 프로토콜의 `durability_remaining` 노출이
+    /// 이 함수 하나만 쓸 예정이다 — 계산식을 두 곳에 복사해두면
+    /// `WEAR_LIMIT_TICKS`를 나중에 튜닝할 때 한쪽만 고치고 잊어버리는
+    /// 드리프트가 생기기 쉽다.
     pub fn wear_ratio(&self) -> f32 {
         (self.worn_ticks as f32 / WEAR_LIMIT_TICKS as f32).min(1.0)
     }
@@ -483,20 +484,28 @@ mod tests {
     }
 
     #[test]
-    fn failed_robot_blocks_the_cell_for_other_robots() {
-        let mut blocker = Robot::new(1, (1, 0), (2, 0)); // would move toward (2,0) if operational
+    fn failed_robot_permanently_blocks_the_cell_for_other_robots() {
+        // A single-tick version of this test can't distinguish "blocked
+        // because Failed" from the pre-existing one-tick lookahead collision
+        // rule (any stationary robot, Failed or not, blocks the cell for
+        // exactly one tick). Running enough ticks that an Operational
+        // blocker would provably have vacated by then (as
+        // `robot_moves_one_step_toward_goal_each_tick` proves it would, on
+        // tick 1) is what actually proves the Failed-freeze is in effect.
+        let mut blocker = Robot::new(1, (1, 0), (2, 0)); // would eventually vacate toward (2,0) if operational
         blocker.status = RobotStatus::Failed;
-        let mover = Robot::new(2, (0, 0), (2, 0)); // only path to its goal runs through (1,0)
+        let mover = Robot::new(2, (0, 0), (2, 0));
         let mut state = simple_state(3, 1);
         state.robots.push(blocker);
         state.robots.push(mover);
 
-        let next = tick(&state);
-
-        let blocker_after = next.robots.iter().find(|r| r.id == 1).unwrap();
-        let mover_after = next.robots.iter().find(|r| r.id == 2).unwrap();
-        assert_eq!(blocker_after.pos, (1, 0), "a Failed robot must never move");
-        assert_eq!(mover_after.pos, (0, 0), "the mover cannot advance into the Failed robot's cell, its only path forward");
+        for _ in 0..10 {
+            state = tick(&state);
+            let blocker_after = state.robots.iter().find(|r| r.id == 1).unwrap();
+            let mover_after = state.robots.iter().find(|r| r.id == 2).unwrap();
+            assert_eq!(blocker_after.pos, (1, 0), "a Failed robot must never move, even toward its own unreached goal");
+            assert_eq!(mover_after.pos, (0, 0), "the mover can never advance into a cell permanently occupied by a Failed robot");
+        }
     }
 
     #[test]
