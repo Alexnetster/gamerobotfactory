@@ -2,6 +2,7 @@ mod config;
 mod game_state;
 mod protocol;
 mod delta;
+mod metrics;
 mod persistence;
 mod session;
 mod ws;
