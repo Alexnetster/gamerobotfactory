@@ -1,4 +1,4 @@
-use sim_core::sim::{Robot, SimState, Task};
+use sim_core::sim::{Robot, RobotStatus, SimState, Task, REPAIR_TICKS};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Conveyor {
@@ -28,9 +28,15 @@ pub struct GameState {
     next_robot_id: u32,
 }
 
+// The shared `RobotNot*` prefix is intentional here (mirrors the domain
+// language used across game_state/ws/protocol), not an accidental naming
+// collision, so the lint is suppressed rather than acted on.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
     RobotNotFound(u32),
+    RobotNotOperational(u32),
+    RobotNotFailed(u32),
 }
 
 /// 설계문서의 성능 목표(20~50대)를 넉넉히 웃도는 상한. 이보다 큰 값이
@@ -97,7 +103,28 @@ impl GameState {
             .iter_mut()
             .find(|r| r.id == robot_id)
             .ok_or(CommandError::RobotNotFound(robot_id))?;
+        if robot.status != RobotStatus::Operational {
+            return Err(CommandError::RobotNotOperational(robot_id));
+        }
         robot.task = task;
+        Ok(())
+    }
+
+    /// 고장난(`Failed`) 로봇을 복구 시작 상태로 전이시킨다. `REPAIR_TICKS`
+    /// 동안 `Repairing` 상태를 거친 뒤 `sim_core::sim::tick()`(Task 1에서
+    /// 추가한 `update_status`)이 자동으로 `Operational`로 되돌리고
+    /// `worn_ticks`를 리셋한다 — 이 함수는 그 카운트다운을 시작만 한다.
+    pub fn repair_robot(&mut self, robot_id: u32) -> Result<(), CommandError> {
+        let robot = self
+            .sim
+            .robots
+            .iter_mut()
+            .find(|r| r.id == robot_id)
+            .ok_or(CommandError::RobotNotFound(robot_id))?;
+        if robot.status != RobotStatus::Failed {
+            return Err(CommandError::RobotNotFailed(robot_id));
+        }
+        robot.status = RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS };
         Ok(())
     }
 }
@@ -209,5 +236,84 @@ mod tests {
         let mut state = empty_state();
         let err = state.trigger_arm_action(999, Task::Picking);
         assert_eq!(err, Err(CommandError::RobotNotFound(999)));
+    }
+
+    #[test]
+    fn trigger_arm_action_rejects_non_operational_robot() {
+        let mut state = empty_state();
+        state.set_robot_count(1);
+        let id = state.sim.robots[0].id;
+        state.sim.robots[0].status = RobotStatus::Failed;
+
+        let err = state.trigger_arm_action(id, Task::Picking);
+
+        assert_eq!(err, Err(CommandError::RobotNotOperational(id)));
+    }
+
+    #[test]
+    fn repair_robot_transitions_a_failed_robot_to_repairing() {
+        let mut state = empty_state();
+        state.set_robot_count(1);
+        let id = state.sim.robots[0].id;
+        state.sim.robots[0].status = RobotStatus::Failed;
+
+        state.repair_robot(id).unwrap();
+
+        assert_eq!(state.sim.robots[0].status, RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS });
+    }
+
+    #[test]
+    fn repair_robot_rejects_a_non_failed_robot() {
+        let mut state = empty_state();
+        state.set_robot_count(1);
+        let id = state.sim.robots[0].id;
+
+        let err = state.repair_robot(id);
+
+        assert_eq!(err, Err(CommandError::RobotNotFailed(id)));
+    }
+
+    #[test]
+    fn repair_robot_rejects_unknown_robot() {
+        let mut state = empty_state();
+        let err = state.repair_robot(999);
+        assert_eq!(err, Err(CommandError::RobotNotFound(999)));
+    }
+
+    #[test]
+    fn select_robot_works_on_a_failed_robot() {
+        // 스펙의 명시적 결정: 고장난 로봇도 선택은 계속 허용해야 오퍼레이터가
+        // 상태를 보고 RepairRobot 대상으로 지정할 수 있다.
+        let mut state = empty_state();
+        state.set_robot_count(1);
+        let id = state.sim.robots[0].id;
+        state.sim.robots[0].status = RobotStatus::Failed;
+
+        state.select_robot(id).unwrap();
+
+        assert_eq!(state.selected_robot, Some(id));
+    }
+
+    #[test]
+    fn set_robot_count_shrink_removes_highest_id_even_if_it_is_repairing() {
+        // 스펙의 명시적 v1 결정: 상태 인지 제거 우선순위는 두지 않는다 —
+        // 복구 중인 로봇도 ID가 가장 크면 그대로 제거 대상이다.
+        let mut state = empty_state();
+        state.set_robot_count(2);
+        let highest_id = state.sim.robots.iter().map(|r| r.id).max().unwrap();
+        state
+            .sim
+            .robots
+            .iter_mut()
+            .find(|r| r.id == highest_id)
+            .unwrap()
+            .status = RobotStatus::Repairing { remaining_ticks: 10 };
+
+        state.set_robot_count(1);
+
+        assert!(
+            !state.sim.robots.iter().any(|r| r.id == highest_id),
+            "a Repairing robot is not special-cased during shrink"
+        );
     }
 }
