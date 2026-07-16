@@ -1,7 +1,7 @@
 use crate::game_state::{Conveyor, GameState};
 use serde::{Deserialize, Serialize};
 use sim_core::grid::CellId;
-use sim_core::sim::{BodyPose, Robot, Task};
+use sim_core::sim::{BodyPose, Robot, RobotStatus, Task};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 
@@ -15,6 +15,7 @@ pub enum ClientCommand {
     ToggleConveyor,
     SetRobotCount { count: usize },
     TriggerArmAction { robot_id: u32, task: WireTask },
+    RepairRobot { robot_id: u32 },
     /// 유예시간 내 재접속인지 확인만 하는 순수 검증 커맨드다. 매 연결마다
     /// 항상 새 세션이 발급되고(핸드셰이크 시점에 이미 스냅샷과 함께
     /// 나간다), 델타 기준선이 전역 공유이므로 `Resume`이 서버 쪽에서
@@ -65,6 +66,24 @@ impl From<BodyPose> for WirePose {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum WireStatus {
+    Operational,
+    Failed,
+    Repairing { remaining_ticks: u32 },
+}
+
+impl From<RobotStatus> for WireStatus {
+    fn from(s: RobotStatus) -> WireStatus {
+        match s {
+            RobotStatus::Operational => WireStatus::Operational,
+            RobotStatus::Failed => WireStatus::Failed,
+            RobotStatus::Repairing { remaining_ticks } => WireStatus::Repairing { remaining_ticks },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WireCellId {
     pub x: i32,
@@ -84,6 +103,8 @@ pub struct RobotView {
     pub pose: WirePose,
     pub leg_cycle_progress: f32,
     pub task: WireTask,
+    pub status: WireStatus,
+    pub durability_remaining: f32,
 }
 
 impl From<&Robot> for RobotView {
@@ -94,8 +115,21 @@ impl From<&Robot> for RobotView {
             pose: r.pose.into(),
             leg_cycle_progress: r.leg_cycle_progress,
             task: r.task.into(),
+            status: r.status.into(),
+            durability_remaining: quantize_durability(r.wear_ratio()),
         }
     }
+}
+
+/// 델타 압축과의 상호작용(설계문서 참고) — 원값을 그대로 실으면 작업
+/// 중인 로봇은 매 틱 델타에 실려서 "안 바뀌면 안 보낸다"는 대역폭 절약이
+/// 무력화된다. 5% 단위로 반올림해서 값이 바뀌는 빈도를 낮춘다(약 100틱에
+/// 한 번). `Repairing`의 `remaining_ticks`는 반대로 일부러 반올림하지
+/// 않는다 — 진행률 표시로서의 가치가 크고, 최대 100틱(5초)으로 짧아서
+/// 대역폭 비용이 무시할 만하다(설계문서 참고).
+fn quantize_durability(wear_ratio: f32) -> f32 {
+    let durability = 1.0 - wear_ratio;
+    (durability * 20.0).round() / 20.0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -155,6 +189,47 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         let back: ClientCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(cmd, back);
+    }
+
+    #[test]
+    fn repair_robot_command_round_trips_through_json() {
+        let cmd = ClientCommand::RepairRobot { robot_id: 5 };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: ClientCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, back);
+    }
+
+    #[test]
+    fn robot_view_reports_operational_status_by_default() {
+        use sim_core::sim::Robot;
+        let robot = Robot::new(1, (0, 0), (0, 0));
+        let view = RobotView::from(&robot);
+        assert_eq!(view.status, WireStatus::Operational);
+        assert_eq!(view.durability_remaining, 1.0);
+    }
+
+    #[test]
+    fn robot_view_quantizes_durability_to_the_nearest_five_percent() {
+        use sim_core::sim::Robot;
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        // wear_ratio = 1100/2000 = 0.55 -> raw durability_remaining 0.45,
+        // 이미 5%의 배수라 반올림 여부와 무관하게 정확히 0.45가 나와야 한다.
+        robot.worn_ticks = 1100;
+
+        let view = RobotView::from(&robot);
+
+        assert_eq!(view.durability_remaining, 0.45);
+    }
+
+    #[test]
+    fn robot_view_reports_repairing_status_with_remaining_ticks() {
+        use sim_core::sim::{Robot, RobotStatus};
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        robot.status = RobotStatus::Repairing { remaining_ticks: 42 };
+
+        let view = RobotView::from(&robot);
+
+        assert_eq!(view.status, WireStatus::Repairing { remaining_ticks: 42 });
     }
 
     #[test]
