@@ -17,6 +17,7 @@
 - 내구도는 **작업 중(Picking/Placing)일 때만** 깎인다.
 - 복구는 **오퍼레이터가 커맨드로 트리거**하고 **고정 틱 수 동안 진행**된다(예비부품 재고 관리 등은 v1 범위 밖).
 - 결정성(같은 입력 → 같은 결과)을 반드시 유지한다 — 기존 `sim_core`의 핵심 불변식.
+- `SetRobotCount`로 로봇 수를 줄일 때, 기존 로직(ID가 가장 큰 로봇부터 제거)을 그대로 쓴다 — `Repairing`/`Failed` 상태를 특별 취급해서 우선순위를 두지 않는다. 즉 복구 진행 중인 로봇도 ID가 가장 크면 그대로 제거될 수 있다. 이건 사각지대가 아니라 **의도적으로 단순함을 택한 v1 결정**이다(상태 인지 제거 우선순위는 스코프 밖).
 
 ## 데이터 모델
 
@@ -55,8 +56,18 @@ robot.worn_ticks += 1;
 const WEAR_LIMIT_TICKS: u64 = 2000;   // 100초 분량의 작업(20Hz 기준) — 튜닝 대상
 const MAX_FAILURE_PROB: f64 = 0.05;   // 완전 마모 상태에서의 틱당 최대 고장 확률 — 튜닝 대상
 
-let wear_ratio = (robot.worn_ticks as f64 / WEAR_LIMIT_TICKS as f64).min(1.0);
-let failure_prob = wear_ratio * MAX_FAILURE_PROB;
+impl Robot {
+    /// 0.0(방금 교체) ~ 1.0(완전 마모)까지의 마모 비율. 고장 확률 계산과
+    /// 프로토콜의 `durability_remaining` 노출 양쪽이 이 하나의 함수만
+    /// 사용한다 — 계산식을 두 곳(sim_core/protocol.rs)에 복사해두면
+    /// `WEAR_LIMIT_TICKS`를 나중에 튜닝할 때 한쪽만 고치고 잊어버리는
+    /// 드리프트가 생기기 쉽다.
+    pub fn wear_ratio(&self) -> f32 {
+        (self.worn_ticks as f32 / WEAR_LIMIT_TICKS as f32).min(1.0)
+    }
+}
+
+let failure_prob = robot.wear_ratio() as f64 * MAX_FAILURE_PROB;
 ```
 
 `worn_ticks`가 `WEAR_LIMIT_TICKS`를 넘어도 확률은 `MAX_FAILURE_PROB`에서 더 안 올라간다(100% 확정 고장은 "확률적" 느낌을 없애므로 상한을 둔다) — 대신 내구도 표시는 0%에서 멈춘다(아래 참고).
@@ -66,7 +77,10 @@ let failure_prob = wear_ratio * MAX_FAILURE_PROB;
 `sim_core::sim::tick`은 `rayon`으로 로봇들을 병렬 갱신하며, 각 로봇은 틱 시작 시점의 스냅샷만 읽는다(더블 버퍼링, 공유 가변 상태 없음). 상태를 가진 RNG(예: `rand::thread_rng()`)를 쓰면 이 병렬-무공유 불변식이 깨진다. 대신 `(robot_id, tick_count)`를 시드로 한 순수 해시 함수로 `[0.0, 1.0)` 구간의 결정적 값을 뽑는다:
 
 ```rust
-/// (robot_id, tick_count)를 섞어 [0.0, 1.0) 구간의 결정적 의사난수를 낸다.
+/// (robot_id, tick_count)를 섞어 대략 [0.0, 1.0] 구간의 결정적 의사난수를
+/// 낸다(u64 -> f64 변환의 부동소수점 반올림으로 극히 드물게 정확히 1.0이
+/// 나올 수 있음 — `failure_prob`가 최대 `MAX_FAILURE_PROB`=0.05를 넘지
+/// 않으므로 그 경우도 그냥 "고장 아님"으로 정확히 처리되어 문제없다).
 /// splitmix64 파이널라이저를 재사용 — 암호학적 강도는 필요 없고, 입력이
 /// 조금만 달라져도 출력이 크게 달라지는 성질(avalanche)만 있으면 된다.
 fn deterministic_roll(robot_id: u32, tick_count: u64) -> f64 {
@@ -84,9 +98,9 @@ fn deterministic_roll(robot_id: u32, tick_count: u64) -> f64 {
 
 `Robot::status != Operational`이면 `plan_robot`(이동 로직)과 `TriggerArmAction`(팔 동작) 둘 다 아무 일도 하지 않는다 — 로봇은 현재 칸에 얼어붙는다.
 
-**그리드 장애물 처리는 새 코드가 필요 없다.** `sim_core::sim::tick`은 이미 매 틱 `occupied: HashSet<CellId> = state.robots.iter().map(|r| r.pos).collect()`로 전체 로봇의 현재 위치를 모아 다른 로봇들의 `find_path` 호출에서 장애물로 사용한다(`server/src/sim.rs:84`, `:137-139`). 고장난 로봇은 단지 위치가 안 바뀔 뿐이므로, 다른 로봇들의 A*는 기존 로직 그대로 그 칸을 피해간다.
+**그리드 장애물 처리는 새 코드가 필요 없다.** `sim_core::sim::tick`은 이미 매 틱 `occupied: HashSet<CellId> = state.robots.iter().map(|r| r.pos).collect()`로 전체 로봇의 현재 위치를 모아 다른 로봇들의 `find_path` 호출에서 장애물로 사용한다(`server/src/sim.rs:84`, `:136-139`). 고장난 로봇은 단지 위치가 안 바뀔 뿐이므로, 다른 로봇들의 A*는 기존 로직 그대로 그 칸을 피해간다.
 
-`TriggerArmAction`을 `status != Operational`인 로봇에 보내면 기존 `CommandError` 패턴을 따라 거부한다(신규 variant, 예: `CommandError::RobotNotOperational(u32)`). `SelectRobot`은 계속 허용한다(고장난 로봇을 선택해서 상태를 확인하고 복구 커맨드를 보낼 대상으로 지정할 수 있어야 하므로).
+`TriggerArmAction`을 `status != Operational`인 로봇에 보내면 기존 `CommandError` 패턴을 따라 거부한다(신규 variant, 예: `CommandError::RobotNotOperational(u32)`). `SelectRobot`은 계속 허용한다(고장난 로봇을 선택해서 상태를 확인하고 복구 커맨드를 보낼 대상으로 지정할 수 있어야 하므로) — `game_state::GameState::selected_robot`은 로봇 ID만 들고 있는 단순 참조라 상태 전이의 영향을 받지 않고, 그 로봇이 완전히 제거될 때만(`set_robot_count`의 기존 로직) 선택이 해제된다. 이 기능이 그 경로를 바꾸지 않는다.
 
 ## 복구 프로세스
 
@@ -108,7 +122,7 @@ RepairRobot { robot_id: u32 },
 
 // RobotView에 추가
 pub status: WireStatus,
-pub durability_remaining: f32,  // 1.0 - (worn_ticks / WEAR_LIMIT_TICKS), [0.0, 1.0] 클램프
+pub durability_remaining: f32,  // 아래 "델타 압축과의 상호작용" 참고 — 원값이 아니라 5% 단위로 반올림한 값
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
@@ -119,7 +133,17 @@ pub enum WireStatus {
 }
 ```
 
-기존 `WireTask`/`WirePose` 변환 패턴과 동일하게 `RobotStatus -> WireStatus` 변환 함수를 추가한다. `Delta`/`Snapshot` 메시지는 이미 `RobotView`를 통째로 담으므로 별도 배선 없이 자동으로 `status`/`durability_remaining`이 실려간다.
+기존 `WireTask`/`WirePose` 변환 패턴과 동일하게 `RobotStatus -> WireStatus` 변환 함수를 추가한다.
+
+`server/src/ws.rs`도 함께 바뀐다: `apply_command`의 `match`가 `ClientCommand`의 모든 variant를 소진적으로 처리하므로, `RepairRobot { robot_id }` 새 arm이 필요하다(`state.repair_robot(robot_id)` 호출 후 실패 시 기존 `TriggerArmAction`/`SelectRobot`과 같은 스타일로 `tracing::warn!`).
+
+### 델타 압축과의 상호작용 (완결성 리뷰에서 발견된 갭)
+
+`durability_remaining`을 매 틱 원값 그대로 실으면 문제가 생긴다: `compute_delta`(`server/src/delta.rs`)는 `RobotView` 전체를 `PartialEq`로 비교해 "바뀐 로봇만" 델타에 담는데, `worn_ticks`가 작업 중 매 틱 증가하므로 원값을 그대로 실으면 **작업 중인 로봇은 가만히 서 있어도 매 틱 델타에 실린다** — 이 프로토콜이 자랑하는 "안 바뀌면 안 보낸다" 대역폭 절약이 정확히 이 케이스에서 무력화된다.
+
+해결: `RobotView`에 담을 때 `durability_remaining`을 **5% 단위로 반올림**한다(`(robot.wear_ratio() * 20.0).round() / 20.0`, `[0.0, 1.0]` 클램프는 반올림 전 `wear_ratio()`가 이미 보장). `WEAR_LIMIT_TICKS=2000` 기준으로 값이 바뀌는 주기가 매 틱(작업 중 내내)에서 약 100틱(5초)에 한 번으로 줄어든다 — 오퍼레이터에게는 5% 단위 표시로 충분하고(대부분의 게임 체력바도 이 정도 해상도), 델타 압축 효과는 대부분 되살아난다. `Delta`/`Snapshot` 메시지는 이미 `RobotView`를 통째로 담으므로, 이 반올림 로직만 `RobotView::from(&Robot)` 안에 넣으면 나머지 배선은 그대로 자동 적용된다.
+
+같은 문제가 `Repairing { remaining_ticks }`에도 이론적으로 있다(복구 중에는 매 틱 감소하므로 델타가 매 틱 나감) — 이건 **의도적으로 반올림하지 않는다**. 복구는 최대 `REPAIR_TICKS`(100틱=5초)로 짧고, 진행 중인 로봇에게는 "몇 틱 남았는지" 실시간으로 보이는 게 오히려 오퍼레이터에게 유용한 피드백(진행률 표시줄과 같은 역할)이다. 마모(최대 2000틱, 작업 중 내내 지속)와 달리 복구는 지속시간과 빈도 둘 다 작아서 대역폭 비용이 무시할 만하다.
 
 ## 관측가능성
 
@@ -140,15 +164,17 @@ CREATE TABLE IF NOT EXISTS robot_failure_events (
 
 `insert_failure_event(conn, tick, robot_id, event_type)` / `recent_failure_events(conn, limit)` 함수를 `insert_stats`/`recent_stats`와 같은 스타일로 추가. 신규 REST 엔드포인트 `GET /api/robots/failures`(기존 `GET /api/stats/history`와 동일한 배선 방식: `spawn_blocking` + 최근 50건).
 
-상태 전이 자체는 `sim_core::sim::tick()`(네트워크 의존성 없는 순수 시뮬레이션 코어) 안에서 일어나므로, `main.rs`의 `spawn_tick_loop`는 매 틱 이전 스냅샷과 이번 틱 스냅샷의 로봇별 `status`를 비교해 전이를 감지한다(로봇 ID 기준 매칭 — 이미 `compute_delta`가 이전/현재 스냅샷을 비교하는 것과 같은 방식). `Operational -> Failed` 전이를 감지하면 이벤트 하나(`'failed'`), `* -> Operational`(Repairing 완료) 전이를 감지하면 이벤트 하나(`'repaired'`)를 만들어 `spawn_blocking`으로 적재한다(기존 `stats_row`를 매 N틱마다 적재하는 것과 달리, 이건 전이가 실제로 일어난 틱에만 적재 — 빈도가 낮으므로 매 틱 비교 정도는 성능에 문제없음).
+`Operational -> Failed`(고장 발생)와 `Repairing -> Operational`(복구 완료) 두 전이는 `sim_core::sim::tick()`(네트워크 의존성 없는 순수 시뮬레이션 코어) 안에서 일어난다. 반면 `Failed -> Repairing`(오퍼레이터의 `RepairRobot` 커맨드)은 `tick()` 밖에서, 기존 `TriggerArmAction`/`SelectRobot`과 똑같이 `ws.rs::apply_command`가 `GameState`를 직접 동기적으로 변경하는 방식으로 일어난다 — 이 전이는 이벤트로 로그하지 않으므로(아래 스키마의 `event_type`은 `'failed'`/`'repaired'` 둘뿐) 위치가 달라도 문제는 없지만, "모든 전이가 tick() 안에서 일어난다"는 식으로 뭉뚱그리면 부정확하다.
+
+`main.rs`의 `spawn_tick_loop`는 매 틱 이전 스냅샷과 이번 틱 스냅샷의 로봇별 `status`를 비교해 `tick()` 안에서 일어난 전이를 감지한다(로봇 ID 기준 매칭 — 이미 `compute_delta`가 이전/현재 스냅샷을 비교하는 것과 같은 방식). `Operational -> Failed` 전이를 감지하면 이벤트 하나(`'failed'`), `Repairing -> Operational` 전이를 감지하면 이벤트 하나(`'repaired'`)를 만들어 `spawn_blocking`으로 적재한다(기존 `stats_row`를 매 N틱마다 적재하는 것과 달리, 이건 전이가 실제로 일어난 틱에만 적재 — 빈도가 낮으므로 매 틱 비교 정도는 성능에 문제없음).
 
 ## 테스트 전략
 
 1. **`deterministic_roll` 단위테스트**: 같은 `(robot_id, tick_count)` 입력 → 항상 같은 출력. 여러 입력에 대해 결과가 `[0.0, 1.0)` 범위 안에 있는지, 대략 고르게 분포하는지(예: 10000개 샘플의 평균이 0.5 근처인지) 확인.
 2. **상태 전이 단위테스트**: `worn_ticks` 누적(작업 중에만) / 고장 시 `Failed` 전이 / `RepairRobot` 거부(비고장 로봇) / 복구 진행(`remaining_ticks` 감소) / 복구 완료 시 `worn_ticks` 리셋.
 3. **기존 결정성 proptest 재검증**: `tick_is_deterministic`/`tick_never_produces_collisions`가 고장 로직 추가 후에도 여전히 성립하는지 — 이 기능이 기존 핵심 불변식을 깨지 않는다는 가장 중요한 증거.
-4. **고장난 로봇이 장애물로 취급되는지 통합/단위테스트**: 고장난 로봇의 칸을 다른 로봇의 `find_path`가 회피하는지 직접 검증(기존 `plan_robot`/`find_path` 테스트 패턴 재사용).
-5. **REST/메트릭 통합테스트**: `robot_failures_total`/`robots_repairing`이 실제로 증가/증감하는지, `/api/robots/failures`에 실제 이벤트가 쌓이는지 — 지금까지와 같은 방식으로 뮤테이션 테스트(관련 로직을 일부러 깨서 테스트가 실패하는지)까지 확인.
+4. **고장난 로봇이 장애물로 취급되는지 단위테스트 + proptest**: 예시 기반 단위테스트(고장난 로봇의 칸을 다른 로봇의 `find_path`가 회피하는지 직접 검증) 하나에 더해, 기존 `server/tests/tick_properties.rs`의 `arbitrary_sim_state` 생성기를 확장해 일부 로봇을 `Failed`/`Repairing`(제자리에 얼어붙은 장애물)로 시딩한 버전으로 `tick_never_produces_collisions`/`tick_is_deterministic`과 같은 속성을 재사용한다 — 이미 투자된 proptest 인프라로 이 기능이 도입하는 시나리오를 거의 공짜로 더 넓게 커버할 수 있다.
+5. **REST/메트릭 통합테스트**: `robot_failures_total`/`robots_repairing`이 실제로 증가/증감하는지, `/api/robots/failures`에 실제 이벤트가 쌓이는지 확인. **중요**: 이 테스트에서 로봇을 실제로 고장내는 방법은 절대 "오래 작업시켜서 자연 마모로 확률적으로 고장나길 기다리는" 방식이 되어서는 안 된다 — `WEAR_LIMIT_TICKS=2000`(100초)에 도달해도 그 뒤로 평균 1/`MAX_FAILURE_PROB`≈20틱을 더 기다려야 하는 확률적 사건이라 테스트가 느리고 플레이키해진다(Task 8에서 뮤테이션 테스트로 잡아낸 벽시계 타이밍 취약점과 같은 함정). 대신 (2)번 항목과 같은 방식으로 테스트 안에서 로봇을 직접 `Failed` 상태로 구성해서(또는 `worn_ticks`를 충분히 높여 `deterministic_roll`이 확실히 임계값을 넘는 `(robot_id, tick_count)` 조합을 미리 계산해서) 결정적으로 고장 상태를 만든 뒤 검증한다. 지금까지와 같은 방식으로 뮤테이션 테스트(관련 로직을 일부러 깨서 테스트가 실패하는지)까지 확인.
 
 ## 스코프 밖 (v2 이상)
 
