@@ -28,7 +28,7 @@
 ## In Progress
 
 ### Plan 3 — 영속화 + REST API + 관측가능성 + 하드닝 (`docs/superpowers/plans/2026-07-15-persistence-observability-plan.md`)
-계획서(`285ca15`, 관측가능성 보강 `dd65136`, `connected_clients` 배선 보강 `4df0e5b`). 10개 태스크: (1)~~세션 재접속 실배선+Lagged 리싱크~~ ✅, (2)~~틱 루프 패닉 방어(`safe_tick`)~~ ✅, (3)~~SQLite 영속화~~ ✅, (4)~~`AppConfig`+`/api/config`~~ ✅, (5)~~Prometheus `/metrics`(+`tick_panics_total`)~~ ✅, (6)~~tracing 구조화 로깅~~ ✅, (7)~~전부 `main.rs`+`ws.rs`에 배선(`connected_clients` RAII 가드 포함)~~ ✅, (8)Lagged 통합테스트, (9)Resume 통합테스트, (10)REST/영속화/메트릭 통합테스트.
+계획서(`285ca15`, 관측가능성 보강 `dd65136`, `connected_clients` 배선 보강 `4df0e5b`). 10개 태스크: (1)~~세션 재접속 실배선+Lagged 리싱크~~ ✅, (2)~~틱 루프 패닉 방어(`safe_tick`)~~ ✅, (3)~~SQLite 영속화~~ ✅, (4)~~`AppConfig`+`/api/config`~~ ✅, (5)~~Prometheus `/metrics`(+`tick_panics_total`)~~ ✅, (6)~~tracing 구조화 로깅~~ ✅, (7)~~전부 `main.rs`+`ws.rs`에 배선(`connected_clients` RAII 가드 포함)~~ ✅, (8)~~Lagged 통합테스트~~ ✅, (9)Resume 통합테스트, (10)REST/영속화/메트릭 통합테스트.
 
 - **Task 1 완료** — 세션 재접속 실배선 + Lagged 리싱크 (`7db4e37`, 문서 보강 `fa2fb1c`) — 실제 WS 클라이언트로 구현자·리뷰어 각자 독립 검증됨(초기 스냅샷에 진짜 session_id, 유효/무효 Resume 각각 정확히 응답). Plan 2 종료 시 남겨뒀던 하드닝 갭 3개 중 2개(재접속 배선, Lagged 처리) 해소.
 - **Task 2 완료** — 틱 루프 패닉 방어 `safe_tick` (`d39b265`, 문서 보강 `10afdbe`) — Plan 2 이후 남은 하드닝 갭 3개 전부 해소. 리뷰에서 "패닉 시 조용히 멈추는 게 관측 안 됨" 지적이 나와, 아직 실행 전인 Task 5/7에 `tick_panics_total` 카운터를 미리 반영해둠(`dd65136`).
@@ -37,6 +37,7 @@
 - **Task 5 완료** — `metrics.rs` Prometheus 레지스트리(`ticks_total`/`connected_clients`/`robot_count`/`tick_panics_total`) (`0b26862`, 주석 정확도 수정 `4df0e5b`) — 리뷰에서 "`connected_clients`를 `ws.rs`의 여러 exit 지점마다 수동으로 inc/dec하면 하나라도 빠뜨려 게이지가 샌다"는 지적이 나와, 아직 실행 전인 Task 7에 RAII 가드(`ConnectionGuard`) 배선을 미리 설계해둠(`4df0e5b`).
 - **Task 6 완료** — `tracing`/`tracing-subscriber` 구조화 로깅으로 `eprintln!` 전체 교체 (`1e75e00`) — 코드 품질 리뷰에서 "`EnvFilter::from_default_env()`는 `RUST_LOG` 미설정 시 ERROR만 통과시켜, 방금 추가한 `warn!` 로그 6개 중 5개가 `cargo run`만으로는 전혀 안 보인다"는 지적이 나와, `try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))`로 수정(`19b2237`) — `RUST_LOG` 미설정 상태에서 WARN 로그가 실제로 출력되는 것까지 직접 재확인됨.
 - **Task 7 완료** — 영속화/설정/메트릭을 `main.rs`+`ws.rs`에 실배선 (`9c6ccff`, 코드 품질 리뷰 수정 `088b3bd`) — `/api/config`가 틱 루프에 실시간 반영되는 것(POST로 `persist_every_n_ticks` 바꾸면 다음 틱부터 즉시 적용), `/api/stats/history`에 실제로 행이 쌓이는 것, `/metrics`의 `gamerobotfactory_connected_clients`가 실제 WS 접속/해제에 따라 오르내리는 것을 전부 실제 클라이언트로 재확인함. 코드 품질 리뷰에서 나온 지적 3개(DB 뮤텍스 poisoning 시 무한 조용한 실패, `stats_history`의 `.expect()`가 panic으로 요청을 죽임, `ConnectionGuard`의 불필요한 라이프타임/clippy 경고)를 전부 수정 후 재검증 완료(clippy 경고 0개, 75/75 통과). 의도적으로 지금 안 고친 것: 틱 루프 몸체 전체(`safe_tick` 바깥)에는 여전히 패닉 가드가 없음 — 아래 Backlog에 남겨둠.
+- **Task 8 완료** — Lagged 리싱크 테스트 (`1f3335e`, 뮤테이션 테스트로 공허함 발견 후 재작성 `9c7df4e`) — **코드 품질 리뷰에서 뮤테이션 테스트로 잡아낸 실질 버그**: 처음 짠 통합테스트는 클라이언트가 3초간 소켓을 안 읽으면 서버가 Lagged를 겪을 거라 가정했지만, 실제로는 서버 쪽 브로드캐스트 수신 루프가 계속 `.recv()`를 부르고 있어서(막히는 건 OS 소켓 버퍼가 찰 때뿐인데 3초/60개 델타로는 어림도 없음) `Lagged` 핸들링을 통째로 `break`로 바꿔도 테스트가 그대로 통과함(진짜 공허 테스트, Plan 1의 vacuous proptest 사례와 같은 패턴). 수정: `handle_socket`의 `Ok`/`Lagged`/`Closed` 분기 로직을 `decide_broadcast_update` 순수 함수로 추출하고, 실제로 `broadcast::channel(32)`를 40개 메시지로 넘치게 한 뒤 진짜 `Err(Lagged(_))`를 받아 검증하는 결정적 단위테스트로 교체 — 리뷰어가 직접 `Lagged` 분기를 깨서 새 테스트가 실패하는 것, 되돌려서 다시 통과하는 것까지 재확인함(78/78 통과, clippy 경고 0개).
 
 ## Backlog
 
@@ -53,6 +54,6 @@
 
 ## 현재 건강도 스냅샷
 
-- `cargo test --manifest-path server/Cargo.toml`: 75/75 통과
+- `cargo test --manifest-path server/Cargo.toml`: 78/78 통과
 - `cargo clippy --all-targets`: 경고 0개
 - `vitest`: 해당 없음 (`client/` 없음)
