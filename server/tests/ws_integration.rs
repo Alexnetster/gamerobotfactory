@@ -121,3 +121,32 @@ async fn invalid_command_does_not_crash_the_connection() {
     }
     assert!(still_connected, "connection should survive an invalid command");
 }
+
+#[tokio::test]
+async fn lagged_client_resyncs_instead_of_disconnecting() {
+    let server = spawn_server();
+
+    let url = format!("ws://127.0.0.1:{}/ws", server.port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("failed to connect to ws endpoint");
+    let (_write, mut read) = ws_stream.split();
+
+    let _first = read.next().await.expect("stream ended early");
+
+    // 브로드캐스트 채널 용량(32)을 넘기도록 충분히 오래 읽지 않는다.
+    // 20Hz(50ms) 기준 32개 버퍼 ≈ 1.6초 — 3초 넘게 기다리면 확실히 넘친다.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let mut still_receiving = false;
+    for _ in 0..10 {
+        match tokio::time::timeout(Duration::from_millis(500), read.next()).await {
+            Ok(Some(Ok(_))) => {
+                still_receiving = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(still_receiving, "connection should survive a lag/resync event, not be dropped");
+}
