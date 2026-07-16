@@ -122,6 +122,75 @@ async fn invalid_command_does_not_crash_the_connection() {
     assert!(still_connected, "connection should survive an invalid command");
 }
 
+#[tokio::test]
+async fn resume_with_a_valid_recent_session_id_is_acknowledged() {
+    let server = spawn_server();
+    let url = format!("ws://127.0.0.1:{}/ws", server.port);
+
+    // 첫 연결: 세션 ID를 받아서 끊는다.
+    let session_id = {
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("connect failed");
+        let (_write, mut read) = ws_stream.split();
+        let first = read.next().await.expect("stream ended early").expect("ws error");
+        let Message::Text(text) = first else { panic!("expected text message") };
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["kind"], "Snapshot");
+        json["session_id"].as_str().expect("snapshot should carry a session_id").to_string()
+        // 여기서 ws_stream이 drop되며 연결이 끊긴다.
+    };
+
+    // 새 연결에서 방금 받은 session_id로 Resume을 보낸다 — 유예시간(30초)
+    // 이내이므로 resumed:true를 받아야 한다.
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("connect failed");
+    let (mut write, mut read) = ws_stream.split();
+    let _snapshot = read.next().await.expect("stream ended early");
+
+    write
+        .send(Message::Text(format!(r#"{{"type":"Resume","session_id":"{session_id}"}}"#)))
+        .await
+        .unwrap();
+
+    let mut saw_ack = false;
+    for _ in 0..10 {
+        let Some(Ok(Message::Text(text))) = read.next().await else { break };
+        let json: Value = serde_json::from_str(&text).unwrap();
+        if json["kind"] == "ResumeAck" {
+            assert_eq!(json["resumed"], true);
+            saw_ack = true;
+            break;
+        }
+    }
+    assert!(saw_ack, "expected a ResumeAck message");
+}
+
+#[tokio::test]
+async fn resume_with_an_unknown_session_id_is_not_acknowledged() {
+    let server = spawn_server();
+    let url = format!("ws://127.0.0.1:{}/ws", server.port);
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("connect failed");
+    let (mut write, mut read) = ws_stream.split();
+    let _snapshot = read.next().await.expect("stream ended early");
+
+    let bogus_id = uuid::Uuid::new_v4();
+    write
+        .send(Message::Text(format!(r#"{{"type":"Resume","session_id":"{bogus_id}"}}"#)))
+        .await
+        .unwrap();
+
+    let mut saw_ack = false;
+    for _ in 0..10 {
+        let Some(Ok(Message::Text(text))) = read.next().await else { break };
+        let json: Value = serde_json::from_str(&text).unwrap();
+        if json["kind"] == "ResumeAck" {
+            assert_eq!(json["resumed"], false);
+            saw_ack = true;
+            break;
+        }
+    }
+    assert!(saw_ack, "expected a ResumeAck message with resumed:false");
+}
+
 // NOTE: an earlier version of this file had a black-box
 // `lagged_client_resyncs_instead_of_disconnecting` test here that simply
 // stopped reading the client socket for 3+ seconds and then asserted the
