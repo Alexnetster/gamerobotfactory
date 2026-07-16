@@ -48,13 +48,14 @@
 ## In Progress
 
 ### 로봇 내구도/고장/복구 (`docs/superpowers/plans/2026-07-16-robot-durability-failure-plan.md`)
-사용시간 누적 → 고장 확률 증가 → 오퍼레이터가 부품 교체(복구) → 장애 감지+조치 프로세스를 로봇 도메인에도 적용하자는 아이디어(브레인스토밍 2026-07-16). 설계 완료(`docs/superpowers/specs/2026-07-16-robot-durability-failure-design.md`, `ba148eb`, 완결성 리뷰 갭 수정 `740d280` — 델타 압축 회귀 방지용 내구도 5% 반올림, 플레이키 테스트 함정 방지용 결정적 시딩 테스트 전략 등), 구현 계획 작성 완료(`cf72051`). 9개 태스크: (1)~~sim_core RobotStatus/마모/결정적 고장/이동정지~~ ✅, (2)~~game_state.rs 커맨드 검증+RepairRobot~~ ✅, (3)~~protocol.rs+delta.rs 와이어 프로토콜~~ ✅, (4)~~ws.rs 통합테스트(배선 자체는 Task 3에서 선반영됨)~~ ✅, (5)~~metrics.rs~~ ✅, (6)persistence.rs, (7)main.rs 전이감지+배선+REST, (8)tick_properties.rs 결정성 proptest, (9)전체 검증+문서 갱신.
+사용시간 누적 → 고장 확률 증가 → 오퍼레이터가 부품 교체(복구) → 장애 감지+조치 프로세스를 로봇 도메인에도 적용하자는 아이디어(브레인스토밍 2026-07-16). 설계 완료(`docs/superpowers/specs/2026-07-16-robot-durability-failure-design.md`, `ba148eb`, 완결성 리뷰 갭 수정 `740d280` — 델타 압축 회귀 방지용 내구도 5% 반올림, 플레이키 테스트 함정 방지용 결정적 시딩 테스트 전략 등), 구현 계획 작성 완료(`cf72051`). 9개 태스크: (1)~~sim_core RobotStatus/마모/결정적 고장/이동정지~~ ✅, (2)~~game_state.rs 커맨드 검증+RepairRobot~~ ✅, (3)~~protocol.rs+delta.rs 와이어 프로토콜~~ ✅, (4)~~ws.rs 통합테스트(배선 자체는 Task 3에서 선반영됨)~~ ✅, (5)~~metrics.rs~~ ✅, (6)~~persistence.rs~~ ✅, (7)main.rs 전이감지+배선+REST, (8)tick_properties.rs 결정성 proptest, (9)전체 검증+문서 갱신.
 
 - **Task 1 완료** — `sim_core`에 `RobotStatus`(Operational/Failed/Repairing) + `worn_ticks` + `wear_ratio()` + `(robot_id, tick_count)` 시드 결정적 해시 고장 판정 + 이동 정지 (`e0a16fc`, 코드 품질 리뷰 수정 `947afd6`) — 기존 `occupied` 스냅샷 메커니즘이 고장난 로봇을 별도 코드 없이 자동으로 장애물 취급하는 것을 활용. **코드 품질 리뷰에서 뮤테이션 테스트로 잡아낸 실질 문제**: 최초의 "고장난 로봇이 장애물 역할을 하는지" 테스트는 한 틱만 확인해서, Failed 여부와 무관하게 이미 존재하던 "한 틱짜리 점유 스냅샷" 규칙만으로도 통과해버리는 공허한 검증이었음(Task 8의 Lagged 사례와 같은 패턴). 목표 로봇을 향해 이동해야 할 로봇을 고장 상태로 만들고 10틱 반복 검증하는 방식으로 재작성 — 리뷰어가 직접 이동정지 게이트를 무력화해서 mover 쪽 단언만 분리해도 실패하는 것까지 확인(정상이라면 그 지점에서 고장 로봇이 비켜서 mover가 전진했을 것이므로). 45/45(lib) 통과, clippy 경고 0개.
 - **Task 2 완료** — `game_state.rs`에 `TriggerArmAction` 상태 가드 + `repair_robot` 메서드 (`c0fd1ee`) — `CommandError`에 `RobotNotOperational`/`RobotNotFailed` 추가하며 clippy `enum_variant_names` 경고가 새로 뜬 것을 `#[allow(...)]`로 좁게 억제(변수명 rename보다 계획서와의 일관성 우선 — 리뷰어는 "rename이 실제로는 파급 범위가 거의 없다"는 반대 의견을 냈지만 둘 다 정당한 선택이라고 판단, 강제 아님). 101/101 통과, clippy 경고 0개. 리뷰에서 나온 지적은 전부 Minor(억제 주석의 "ws.rs/protocol.rs도 이 이름을 참조한다"는 문구가 사실과 다름, `set_robot_count`+`Repairing` 회귀테스트가 "지금의" 동작이 아니라 "미래의" 실수를 막는 가드에 가깝다는 설명 보강 필요)라 수정 없이 승인.
 - **Task 3 완료** — `protocol.rs`에 `WireStatus` + `RobotView.status`/`durability_remaining`(5% 반올림) + `RepairRobot` 커맨드, `delta.rs` 테스트 헬퍼 수정 (`f7d440c`) — `ClientCommand::RepairRobot` 추가로 `ws.rs::apply_command`의 소진적 매치가 깨지는 것을 막기 위해 Task 4 Step 1(정확히 같은 코드)을 선반영함을 커밋 메시지에 명시, 스펙 리뷰어가 계획서 Task 4 텍스트와 바이트 단위로 대조해 확인. 코드 품질 리뷰에서 `quantize_durability`가 실제로 델타 압축을 되살리는지 직접 계산 검증(`worn_ticks` 0~20까지 전부 `durability_remaining=1.0`으로 동일, 약 100틱에 한 번만 바뀜 — 설계문서 주장과 일치). 105/105 통과, clippy 경고 0개. **부수 발견**: 설계문서(`docs/superpowers/specs/...design.md`)의 수식 설명이 `1.0 -` 반전을 빠뜨려서 문자 그대로 읽으면 새 로봇이 내구도 0%로 나오는 오류였음(실제 구현/계획 문서 코드는 처음부터 맞았음) — 별도 커밋(`4b71d98`)으로 수정.
 - **Task 4 완료** — WS 통합테스트 1개 추가(`aac1eae`, 코드 리뷰 후속 주석 보강 `c2aed3d`) — 배선 자체는 Task 3에서 이미 끝나 있어(`f7d440c`) 테스트만 추가. 코드 품질 리뷰가 이 테스트 하나만으로는 "RepairRobot이 실제로 파싱돼서 거부됐다"와 "JSON이 애초에 안 파싱됐다"를 구분 못 함을 직접 뮤테이션으로 확인(둘 다 연결은 안 죽으므로) — 다만 `protocol.rs`의 파싱 증명 테스트 + `game_state.rs`의 거부 사유 증명 테스트와 합쳐지면 전체 주장은 성립한다고 판단해 승인, 그 구성 관계를 명시하는 주석만 보강. 106/106 통과, clippy 경고 0개.
 - **Task 5 완료** — `metrics.rs`에 `robot_failures_total`/`robots_repairing` 추가 (`2864597`) — 기존 5개 메트릭과 같은 "write-then-wire-later" 패턴(아직 어디서도 안 읽음/안 증가시킴, Task 7에서 배선). `.expect()` 문구 5→7개 이름으로 전부 일관되게 갱신됐는지, 캐시 없이 clean build로 dead-code 경고가 안 뜨는지 리뷰어가 직접 확인. 107/107 통과, clippy 경고 0개. Minor 하나(게이지 이름 `robots_repairing`이 다른 형제 게이지들의 "명사_count" 네이밍과 살짝 다름)만 나와 수정 없이 승인.
+- **Task 6 완료** — `persistence.rs`에 `robot_failure_events` 테이블 + `FailureEvent`/`insert_failure_event`/`recent_failure_events` (`43c02ae`) — 기존 `stats_history`와 같은 패턴, 아직 미배선(Task 7). 이번엔 파일 전체가 아니라 새로 추가된 3개 항목에만 `#[allow(dead_code)]`를 좁게 붙임(이미 배선된 `stats_history` 쪽 코드의 dead-code 검사는 그대로 살아있게) — `session.rs`/`persistence.rs`가 예전에 썼던 파일 전체 억제 방식에서 한 단계 더 정교해진 것. 110/110 통과, clippy 경고 0개. Minor만 남음(향후 실제 배선 시 `event_type`에 CHECK 제약 고려해볼 만함, 모듈 최상단 문서 주석이 아직 이 새 테이블을 언급 안 함) — 수정 없이 승인.
 
 ## Backlog
 
@@ -75,6 +76,6 @@
 
 ## 현재 건강도 스냅샷
 
-- `cargo test --manifest-path server/Cargo.toml`: 107/107 통과 (진행 중인 로봇 내구도 기능 Task 1~5 반영, 총계는 태스크가 진행되며 계속 늘어남)
+- `cargo test --manifest-path server/Cargo.toml`: 110/110 통과 (진행 중인 로봇 내구도 기능 Task 1~6 반영, 총계는 태스크가 진행되며 계속 늘어남)
 - `cargo clippy --all-targets`: 경고 0개
 - `vitest`: 해당 없음 (`client/` 없음)
