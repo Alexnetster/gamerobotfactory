@@ -36,6 +36,11 @@ pub async fn get_config(Extension(config): Extension<ConfigHandle>) -> impl Into
     Json(current)
 }
 
+// TODO(향후 필드 추가 시): 지금은 구조체 전체를 통째로 교체한다 — 필드가
+// 하나뿐이라 괜찮지만, 필드가 늘어나면 부분 업데이트(JSON 일부 필드만
+// 보내기)가 나머지 필드 누락으로 역직렬화 실패를 일으킨다. 그때 가서
+// `Option<T>` 필드를 가진 패치 타입으로 바꾸거나 `#[serde(default)]`를
+// 붙이는 것을 고려한다.
 pub async fn post_config(
     Extension(config): Extension<ConfigHandle>,
     Json(update): Json<AppConfig>,
