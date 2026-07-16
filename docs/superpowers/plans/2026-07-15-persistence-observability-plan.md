@@ -756,6 +756,7 @@ git commit -m "feat: replace ad-hoc eprintln logging with structured tracing"
 
 **Files:**
 - Modify: `server/src/main.rs`
+- Modify: `server/src/ws.rs`
 
 - [ ] **Step 1: 상태 초기화 + 라우트 추가**
 
@@ -921,24 +922,85 @@ async fn main() {
 
 `mod persistence; mod config; mod metrics;` 선언이 파일 상단에 이미 있는지 확인하고(Task 3~5에서 추가했다면 있음), 없으면 추가한다.
 
-- [ ] **Step 2: 빌드 확인**
+- [ ] **Step 2: `ws.rs`에 연결 수(`connected_clients`) 배선**
+
+`connected_clients`는 WS 연결의 수명 동안만 유효한 게이지다. `handle_socket`에는 exit 지점이 여럿 있다 — 초기 스냅샷 전송 실패 시의 `return`, `tokio::select!` 루프 안의 여러 `break`(소켓 에러, 정상 종료, 브로드캐스트 채널 종료). 이 지점마다 수동으로 `inc`/`dec`를 맞춰 넣으면 하나라도 빠뜨렸을 때 게이지가 조용히 계속 늘어나기만 하는 버그가 된다(Task 5 코드 리뷰에서 지적됨). 대신 RAII 가드로 수명을 자동으로 묶는다.
+
+`server/src/ws.rs`에 추가:
+```rust
+struct ConnectionGuard<'a> {
+    counter: &'a prometheus::IntGauge,
+}
+
+impl<'a> ConnectionGuard<'a> {
+    fn new(counter: &'a prometheus::IntGauge) -> Self {
+        counter.inc();
+        ConnectionGuard { counter }
+    }
+}
+
+impl<'a> Drop for ConnectionGuard<'a> {
+    fn drop(&mut self) {
+        self.counter.dec();
+    }
+}
+```
+
+`ws_route`에 네 번째 익스트랙터를 추가:
+```rust
+pub async fn ws_route(
+    ws: WebSocketUpgrade,
+    State(state): State<SharedState>,
+    axum::extract::Extension(broadcaster): axum::extract::Extension<Broadcaster>,
+    axum::extract::Extension(sessions): axum::extract::Extension<SessionHandle>,
+    axum::extract::Extension(metrics): axum::extract::Extension<crate::metrics::MetricsHandle>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, broadcaster, sessions, metrics))
+}
+```
+
+`handle_socket`의 시그니처에 `metrics: crate::metrics::MetricsHandle`를 추가하고, 함수 맨 앞(세션 발급 직후, 어떤 `return`/`break`보다도 먼저)에 가드를 만든다:
+```rust
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: SharedState,
+    broadcaster: Broadcaster,
+    sessions: SessionHandle,
+    metrics: crate::metrics::MetricsHandle,
+) {
+    let mut updates = broadcaster.subscribe();
+
+    let own_session_id = {
+        let mut registry = sessions.lock().await;
+        registry.start_session(std::time::Instant::now())
+    };
+
+    let _connection_guard = ConnectionGuard::new(&metrics.connected_clients);
+
+    // (이후 기존 초기 스냅샷 전송 블록 + tokio::select! 루프는 그대로 유지)
+    ...
+}
+```
+`_connection_guard`는 `handle_socket`이 어떤 경로로 끝나든(정상 종료, 여러 `break`, 심지어 패닉) 함수 스코프를 벗어나는 순간 `Drop`이 실행되어 자동으로 `dec()`한다 — 각 exit 지점마다 수동으로 맞출 필요가 없다. `build_app`에 이미 있는 `.layer(axum::extract::Extension(metrics))`가 `/ws` 라우트에도 적용되므로 라우터 쪽 추가 배선은 필요 없다.
+
+- [ ] **Step 3: 빌드 확인**
 
 Run: `cargo build --manifest-path server/Cargo.toml`
 Expected: 컴파일 성공. `DbHandle`이 `std::sync::Mutex`(rusqlite 커넥션은 `Send`지만 `tokio::sync::Mutex`로 감쌀 필요는 없다 — 잠깐 잠그고 동기 작업만 하므로 `std::sync::Mutex` + `spawn_blocking`이 더 적절)를 쓰는지 확인.
 
-- [ ] **Step 3: 수동 확인**
+- [ ] **Step 4: 수동 확인**
 
-서버를 띄우고: `curl http://127.0.0.1:<port>/api/config` (기본값 JSON), `curl -X POST -H "Content-Type: application/json" -d '{"persist_every_n_ticks":1}' http://127.0.0.1:<port>/api/config` (갱신), 1초 정도 기다린 뒤 `curl http://127.0.0.1:<port>/api/stats/history` (행이 쌓였는지), `curl http://127.0.0.1:<port>/metrics` (Prometheus 텍스트) 를 각각 실제로 호출해 확인한다.
+서버를 띄우고: `curl http://127.0.0.1:<port>/api/config` (기본값 JSON), `curl -X POST -H "Content-Type: application/json" -d '{"persist_every_n_ticks":1}' http://127.0.0.1:<port>/api/config` (갱신), 1초 정도 기다린 뒤 `curl http://127.0.0.1:<port>/api/stats/history` (행이 쌓였는지), `curl http://127.0.0.1:<port>/metrics` (Prometheus 텍스트, `gamerobotfactory_connected_clients`가 WS 클라이언트 접속/해제에 따라 오르내리는지도 실제 WS 클라이언트를 하나 붙였다 떼면서 확인)를 각각 실제로 호출해 확인한다.
 
-- [ ] **Step 4: 테스트 실행**
+- [ ] **Step 5: 테스트 실행**
 
 Run: `cargo test --manifest-path server/Cargo.toml`
-Expected: 이전 스위트 전부 PASS. `main.rs`를 크게 고쳤으니 회귀가 없는지 특히 주의해서 확인한다(기존 WS 통합테스트 2개 + Lagged 테스트도 여전히 통과해야 한다).
+Expected: 이전 스위트 전부 PASS. `main.rs`/`ws.rs`를 크게 고쳤으니 회귀가 없는지 특히 주의해서 확인한다(기존 WS 통합테스트 2개 + Lagged 테스트도 여전히 통과해야 한다).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add server/src/main.rs
+git add server/src/main.rs server/src/ws.rs
 git commit -m "feat: wire persistence, config, and metrics into the server's state and routes"
 ```
 

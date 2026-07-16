@@ -37,25 +37,25 @@ impl Metrics {
             "Total simulation ticks processed",
             registry
         )
-        .expect("metric registration is infallible for a fresh registry");
+        .expect("registration only fails on a duplicate/invalid metric name; these 4 names are distinct and validly formed");
         let connected_clients = register_int_gauge_with_registry!(
             "gamerobotfactory_connected_clients",
             "Currently connected WebSocket clients",
             registry
         )
-        .expect("metric registration is infallible for a fresh registry");
+        .expect("registration only fails on a duplicate/invalid metric name; these 4 names are distinct and validly formed");
         let robot_count = register_int_gauge_with_registry!(
             "gamerobotfactory_robot_count",
             "Current number of robots in the simulation",
             registry
         )
-        .expect("metric registration is infallible for a fresh registry");
+        .expect("registration only fails on a duplicate/invalid metric name; these 4 names are distinct and validly formed");
         let tick_panics_total = register_int_counter_with_registry!(
             "gamerobotfactory_tick_panics_total",
             "Total number of ticks where sim_core::sim::tick panicked and was skipped",
             registry
         )
-        .expect("metric registration is infallible for a fresh registry");
+        .expect("registration only fails on a duplicate/invalid metric name; these 4 names are distinct and validly formed");
 
         Metrics { registry, ticks_total, connected_clients, robot_count, tick_panics_total }
     }
