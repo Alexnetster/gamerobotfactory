@@ -39,7 +39,13 @@
 - **Task 9 완료** — Resume 통합테스트 2개(유효/무효 session_id) (`910b61b`) — Task 8의 교훈을 반영해 구현자·리뷰어 모두 뮤테이션 테스트로 검증: `resumed`를 강제로 `true`/`false` 고정시켜봐도 두 테스트 중 하나는 반드시 실패함을 직접 확인(둘이 짝을 이뤄야 진짜 검증이 된다는 것 재확인). 리뷰에서 나온 지적은 전부 Minor(중복된 `uuid` dev-dependency 한 줄, 타임아웃 가드 없음 — 실제 행 위험은 없다고 리뷰어가 직접 확인)라 수정 없이 승인(80/80 통과, clippy 경고 0개).
 - **Task 10 완료** — REST/영속화/메트릭 통합테스트 (`ab7f002`, 구현자 자체 발견으로 메트릭 테스트 보강 `a2396f2`) — `config.rs`/`persistence.rs`/`metrics.rs`를 실제 서버 바이너리(테스트별 격리된 임시 SQLite 경로) + `reqwest`로 검증. 구현자가 스스로 "메트릭 이름만 확인하고 값은 확인 안 함"이라는 공허 위험을 발견해 `ticks_total` 실제 값이 0보다 큰지 파싱해서 확인하도록 자체 보강. 리뷰에서 `insert_stats`를 no-op으로, `ticks_total.inc()` 호출을 주석 처리로 각각 뮤테이션해 두 테스트가 실제로 실패하는 것/되돌리면 통과하는 것 재확인. Minor만 남음(임시 DB 파일이 assert 실패 시 `Drop` 가드 없이 정리 안 될 수 있음, stats_history 테스트가 행 개수만 보고 필드 값은 검증 안 함, `tick_panics_total`을 실제로 건드리는 REST 레벨 테스트는 없음) — 전부 Backlog로 이관.
 
-**Plan 3 전체 완료.** 84개 테스트 통과, clippy 경고 0개. Plan 2 종료 시 남겨뒀던 하드닝 갭 3개(재접속 실배선, Lagged 리싱크, 틱 루프 패닉 방어) 전부 코드로 구현되고 통합테스트로 검증됨. SQLite 생산 통계 영속화, 실시간(WS)과 분리된 `/api/config` 설정 채널, `tracing` 구조화 로깅 + `/metrics` Prometheus 엔드포인트 전부 실배선+검증 완료. 다음은 Plan 4(클라이언트 렌더링).
+**Plan 3 전체 완료.** 84개 테스트 통과, clippy 경고 0개. Plan 2 종료 시 남겨뒀던 하드닝 갭 3개(재접속 실배선, Lagged 리싱크, 틱 루프 패닉 방어) 전부 코드로 구현되고 통합테스트로 검증됨. SQLite 생산 통계 영속화, 실시간(WS)과 분리된 `/api/config` 설정 채널, `tracing` 구조화 로깅 + `/metrics` Prometheus 엔드포인트 전부 실배선+검증 완료.
+
+### Plan 3~4 사이 보강 — 틱 처리시간 p99 메트릭
+설계문서(line 101)가 요구하는 "틱 처리 시간 p99 < 10ms" 목표를 측정할 수단이 없었던 갭을 상태 점검 중 발견해 별도 태스크로 처리.
+- **완료** — `gamerobotfactory_tick_duration_seconds` Prometheus 히스토그램 추가 (`1d978fd`) — `state.lock()` 획득부터 스냅샷/델타 계산까지(브로드캐스트 전송·비동기 영속화 디스패치는 제외)의 실제 소요시간을 매 틱 측정. 10ms(p99 목표)와 50ms(20Hz 틱 예산)를 정확히 버킷 경계로 포함해 `histogram_quantile`로 바로 조회 가능. 구현자·리뷰어 모두 `.observe()` 호출을 제거해도 REST 통합테스트가 통과하는지 뮤테이션 테스트로 확인(둘 다 실제로 실패 → 되돌리면 통과, 85/85 통과, clippy 경고 0개).
+
+다음은 Plan 4(클라이언트 렌더링).
 
 ## Backlog
 
@@ -55,10 +61,11 @@
 - `server/tests/rest_integration.rs`의 임시 SQLite 파일 정리가 각 테스트 끝에 있는 평범한 `remove_file` 호출이라, 그 전에 assert가 패닉하면 파일이 안 지워짐(`ServerProcess`의 프로세스 kill은 `Drop`이라 안전한데 파일 정리는 아님) — 실질적 위험은 낮음(UUID 이름, OS 임시 폴더). (Task 10 리뷰)
 
 ### 기타 (문서 위생, 급하지 않음)
-- Plan 1/2 계획 문서의 태스크 체크박스(`- [ ]`)가 실제 완료 상태를 반영하지 못하고 있음 — 기능 영향 없는 문서 위생 이슈.
+- Plan 1/2/3 계획 문서 3개 전부(스텝 총 100+개) 태스크 체크박스(`- [ ]`)가 실제 완료 상태를 반영하지 못하고 있음 — 기능 영향 없는 문서 위생 이슈. (상태 점검 중 Plan 3도 해당됨을 추가 확인)
+- 설계문서가 v1 스코프에 "CI"를 명시하고 있으나(`docs/robot-arm-conveyor-game-design.md` 백엔드 요약 표) `.github/workflows` 자체가 없음 — 지금은 로컬 `cargo test`/`clippy`로만 검증됨.
 
 ## 현재 건강도 스냅샷
 
-- `cargo test --manifest-path server/Cargo.toml`: 84/84 통과
+- `cargo test --manifest-path server/Cargo.toml`: 85/85 통과
 - `cargo clippy --all-targets`: 경고 0개
 - `vitest`: 해당 없음 (`client/` 없음)
