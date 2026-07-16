@@ -111,6 +111,7 @@ const REPAIR_TICKS: u32 = 100; // 20Hz 기준 5초 — 튜닝 대상
 - `RepairRobot { robot_id: u32 }` 커맨드(신규) 처리 시: 대상 로봇이 `status == Failed`가 아니면 `game_state::CommandError`(기존 `RobotNotFound` 하나뿐인 enum에 신규 variant 추가, 예: `CommandError::RobotNotFailed(u32)`)로 거부. 맞으면 `status = Repairing { remaining_ticks: REPAIR_TICKS }`로 전이.
 - 매 틱, `Repairing { remaining_ticks }` 상태인 로봇은 `remaining_ticks`를 1 감소시킨다. 0이 되면 `status = Operational`, `worn_ticks = 0`으로 리셋(부품 교체 완료).
 - **동시 복구 대수 제한 없음**(v1) — 여러 로봇이 동시에 `Repairing` 상태일 수 있고, 각자 독립적으로 `remaining_ticks`가 줄어든다. "정비 인력/슬롯" 같은 자원 제약은 스코프 밖(아래 참고).
+- **복구가 끝나는 바로 그 틱에 이동도 가능하다**(구현 중 proptest로 발견되고 리뷰에서 확정된 동작) — `remaining_ticks: 1`인 로봇은 그 틱에 `Operational`로 전이된 뒤, 같은 틱 안에서 이동 로직까지 이어서 실행된다(별도의 "막 복구된 틱"을 얼려두지 않음). 굳이 한 틱(20Hz 기준 50ms) 더 얼려두는 것은 오퍼레이터가 체감할 수도 없고 이 문서 어디에도 요구된 적 없는 인위적인 지연이라, "복구되면 하던 일을 바로 이어간다"는 의도에 더 맞는 지금 동작을 그대로 유지하기로 함.
 
 ## 프로토콜 변경
 
