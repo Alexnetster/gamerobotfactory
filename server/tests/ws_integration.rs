@@ -198,6 +198,14 @@ async fn repair_robot_on_a_healthy_robot_is_rejected_without_crashing_the_connec
     // 된다(설계문서/Task 8의 교훈). 여기서는 거부 경로가 연결을 죽이지
     // 않는지만 실제 서버로 확인하고, 성공 경로는 game_state.rs의 결정적
     // 단위테스트가 이미 검증한다.
+    //
+    // 이 테스트 하나만으로는 "RepairRobot이 실제로 파싱돼서 거부됐다"와
+    // "JSON이 애초에 RepairRobot으로 파싱 안 됐다"를 구분하지 못한다(둘 다
+    // 연결이 안 죽는 건 똑같으므로) — 그 구분은 protocol.rs의
+    // `repair_robot_command_round_trips_through_json`(파싱 자체를 증명)과
+    // game_state.rs의 `repair_robot_rejects_a_non_failed_robot`(실제 거부
+    // 사유를 증명)이 대신 담당한다. 이 테스트는 그 위에 "연결이 안 죽는다"만
+    // 얹는 것이다.
     let server = spawn_server();
 
     let url = format!("ws://127.0.0.1:{}/ws", server.port);
