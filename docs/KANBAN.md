@@ -45,9 +45,11 @@
 설계문서(line 101)가 요구하는 "틱 처리 시간 p99 < 10ms" 목표를 측정할 수단이 없었던 갭을 상태 점검 중 발견해 별도 태스크로 처리.
 - **완료** — `gamerobotfactory_tick_duration_seconds` Prometheus 히스토그램 추가 (`1d978fd`) — `state.lock()` 획득부터 스냅샷/델타 계산까지(브로드캐스트 전송·비동기 영속화 디스패치는 제외)의 실제 소요시간을 매 틱 측정. 10ms(p99 목표)와 50ms(20Hz 틱 예산)를 정확히 버킷 경계로 포함해 `histogram_quantile`로 바로 조회 가능. 구현자·리뷰어 모두 `.observe()` 호출을 제거해도 REST 통합테스트가 통과하는지 뮤테이션 테스트로 확인(둘 다 실제로 실패 → 되돌리면 통과, 85/85 통과, clippy 경고 0개).
 
-다음은 Plan 4(클라이언트 렌더링).
-
 ## Backlog
+
+### 로봇 내구도/고장/복구 (설계 완료, 구현 대기)
+사용시간 누적 → 고장 확률 증가 → 오퍼레이터가 부품 교체(복구) → 장애 감지+조치 프로세스를 로봇 도메인에도 적용하자는 아이디어(브레인스토밍 2026-07-16).
+- **설계 완료** — `docs/superpowers/specs/2026-07-16-robot-durability-failure-design.md` (`ba148eb`) — 단일 내구도 값, `(robot_id, tick_count)` 시드 결정적 해시로 병렬 틱과 공존하는 고장 판정, 별도 `status` 필드(기존 `task`와 분리), `RepairRobot` 커맨드, `robot_failures_total`/`robots_repairing` 메트릭, `robot_failure_events` SQLite 테이블. **사용자 스펙 리뷰 승인 대기 중** — 승인되면 writing-plans로 구현 계획 작성.
 
 ### Plan 4~5 (아직 계획 문서 없음, 설계문서 로드맵만 있음)
 - **Plan 4** — 클라이언트 렌더링 (`client/` 디렉토리 자체가 아직 없음 — Vite+TS+Canvas, 아이소메트릭 투영)
