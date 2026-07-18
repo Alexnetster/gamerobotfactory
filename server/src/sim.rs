@@ -28,6 +28,31 @@ impl BodyPose {
     }
 }
 
+/// 로봇이 마지막으로 실제 이동한 방향(그리드는 4방향 이동만 지원하므로
+/// `Grid::neighbors`, `grid.rs:33-39` — 대각선은 없다). 렌더러(Plan 4)가
+/// 몸체-로컬 팔 타겟을 월드 좌표로 회전시키는 기준으로 쓴다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl Direction {
+    /// 로봇이 `from`에서 `to`로 정확히 한 칸 이동했을 때의 방향.
+    /// 이동이 없으면(`from == to`) `None` — 호출부가 기존 방향을 유지한다.
+    pub fn from_move(from: CellId, to: CellId) -> Option<Direction> {
+        match (to.0 - from.0, to.1 - from.1) {
+            (1, 0) => Some(Direction::East),
+            (-1, 0) => Some(Direction::West),
+            (0, 1) => Some(Direction::North),
+            (0, -1) => Some(Direction::South),
+            _ => None,
+        }
+    }
+}
+
 /// 로봇이 지금 수행 중인 팔 작업. `TriggerArmAction` 커맨드가 이 값을
 /// 바꾼다 — 실제 IK/애니메이션 계산은 클라이언트/렌더러(Plan 4)의 몫이고,
 /// 여기서는 "지금 무슨 작업 중인가"라는 사실만 기록한다.
@@ -61,6 +86,7 @@ pub struct Robot {
     pub task: Task,
     pub worn_ticks: u64,
     pub status: RobotStatus,
+    pub facing: Direction,
 }
 
 impl Robot {
@@ -76,6 +102,7 @@ impl Robot {
             task: Task::Idle,
             worn_ticks: 0,
             status: RobotStatus::Operational,
+            facing: Direction::East,
         }
     }
 
@@ -191,6 +218,9 @@ pub fn tick(state: &SimState) -> SimState {
             }
             if robot.pos != original.pos {
                 robot.leg_cycle_progress = (robot.leg_cycle_progress + LEG_CYCLE_SPEED).rem_euclid(1.0);
+                if let Some(dir) = Direction::from_move(original.pos, robot.pos) {
+                    robot.facing = dir;
+                }
             }
             robot
         })
@@ -522,5 +552,77 @@ mod tests {
         let after_two = tick(&after_one);
         assert_eq!(after_two.robots[0].status, RobotStatus::Operational);
         assert_eq!(after_two.robots[0].worn_ticks, 0, "worn_ticks should reset to 0 once repair completes");
+    }
+
+    #[test]
+    fn direction_from_move_detects_four_cardinal_directions() {
+        assert_eq!(Direction::from_move((0, 0), (1, 0)), Some(Direction::East));
+        assert_eq!(Direction::from_move((0, 0), (-1, 0)), Some(Direction::West));
+        assert_eq!(Direction::from_move((0, 0), (0, 1)), Some(Direction::North));
+        assert_eq!(Direction::from_move((0, 0), (0, -1)), Some(Direction::South));
+    }
+
+    #[test]
+    fn direction_from_move_returns_none_when_positions_are_equal() {
+        assert_eq!(Direction::from_move((2, 2), (2, 2)), None);
+    }
+
+    #[test]
+    fn new_robot_faces_east_by_default() {
+        let robot = Robot::new(1, (0, 0), (0, 0));
+        assert_eq!(robot.facing, Direction::East);
+    }
+
+    #[test]
+    fn facing_updates_to_match_actual_movement_direction() {
+        let mut state = simple_state(5, 1);
+        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
+
+        let next = tick(&state);
+
+        assert_eq!(next.robots[0].facing, Direction::East);
+    }
+
+    #[test]
+    fn facing_does_not_change_when_a_robot_loses_its_tiebreak() {
+        // 로봇 2는 타이브레이크에서 져서 (2,0)에 그대로 남는다 — facing이
+        // 기본값(East)에서 바뀌면 안 된다. plan_robot() 안(타이브레이크 확정
+        // 전)에서 facing을 갱신하면 이 테스트가 실패한다 — "실제로 하지
+        //않은 이동"으로 잘못 회전하는 버그를 정확히 잡아내기 위한 테스트.
+        let mut state = simple_state(3, 1);
+        state.robots.push(Robot::new(1, (0, 0), (2, 0)));
+        state.robots.push(Robot::new(2, (2, 0), (0, 0)));
+
+        let next = tick(&state);
+
+        let r2 = next.robots.iter().find(|r| r.id == 2).unwrap();
+        assert_eq!(r2.pos, (2, 0), "진 로봇은 제자리에 남아야 한다(기존 불변식)");
+        assert_eq!(r2.facing, Direction::East, "실제로 이동하지 않았으니 facing도 바뀌면 안 된다");
+    }
+
+    #[test]
+    fn facing_holds_last_direction_while_stationary() {
+        let mut state = simple_state(5, 1);
+        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
+        state = tick(&state); // 동쪽으로 한 칸 이동 -> facing = East
+        assert_eq!(state.robots[0].facing, Direction::East);
+
+        // 목표를 직접 바꿀 때는 남아 있는 경로/재계획 타이머도 함께 지워야 한다
+        // — 그러지 않으면 plan_robot()이 새 목표를 무시하고 옛 경로(동쪽)를
+        // 계속 따라간다. 실제 프로덕션 코드에는 이렇게 goal만 단독으로
+        // 바꾸는 경로가 없다(Robot::new에서 한 번만 설정됨) — 이 테스트가
+        // 그 시나리오를 시뮬레이션하려면 tick()의 타이브레이크 패배 분기와
+        // 동일하게 경로를 초기화해줘야 한다.
+        state.robots[0].goal = (0, 0); // 이제 서쪽으로
+        state.robots[0].path.clear();
+        state.robots[0].ticks_until_repath = 0;
+        state = tick(&state);
+        assert_eq!(state.robots[0].facing, Direction::West);
+
+        // 목표 지점에 도달해 멈춘 뒤에도 마지막 방향을 유지해야 한다.
+        let settled = state.robots[0].pos;
+        state.robots[0].goal = settled;
+        let held = tick(&state);
+        assert_eq!(held.robots[0].facing, Direction::West);
     }
 }
