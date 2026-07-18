@@ -227,6 +227,27 @@ pub fn tick(state: &SimState) -> SimState {
     SimState { grid: state.grid.clone(), robots: new_robots, tick_count: state.tick_count + 1 }
 }
 
+/// 로봇 id로부터 결정적으로 계산되는 순찰 지점 두 개. 그리드 폭/높이 중
+/// 1보다 큰 축만 절반만큼 떨어뜨려서 두 지점이 항상 서로 다르다는 걸
+/// 보장한다 — 실제 그리드 크기(프로덕션 10x10)뿐 아니라 기존
+/// 유닛테스트가 쓰는 가늘고 긴 그리드(예: 5x1)에서도 안전하다.
+fn patrol_points(id: u32, grid: &Grid) -> (CellId, CellId) {
+    let w = grid.width.max(1);
+    let h = grid.height.max(1);
+    let a = ((id as i32 * 7).rem_euclid(w), (id as i32 * 3).rem_euclid(h));
+    let dx = if w > 1 { w / 2 } else { 0 };
+    let dy = if h > 1 { h / 2 } else { 0 };
+    let b = ((a.0 + dx).rem_euclid(w), (a.1 + dy).rem_euclid(h));
+    (a, b)
+}
+
+/// 로봇이 목표에 도착했을 때 다음 순찰 목표를 계산한다 — 현재 목표가
+/// A면 B로, 그 외(B거나 스폰 시점의 초기 goal==pos)엔 A로.
+fn next_patrol_goal(robot: &Robot, grid: &Grid) -> CellId {
+    let (a, b) = patrol_points(robot.id, grid);
+    if robot.goal == a { b } else { a }
+}
+
 fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64) -> Robot {
     let mut next = update_status(robot.clone(), tick_count);
 
@@ -239,7 +260,7 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count
     }
 
     if next.pos == next.goal {
-        return next;
+        next.goal = next_patrol_goal(&next, grid);
     }
 
     if next.path.is_empty() || next.ticks_until_repath == 0 {
@@ -340,13 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn robot_stops_moving_once_at_goal() {
+    fn robot_picks_a_new_patrol_goal_and_moves_on_the_same_tick_it_arrives() {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (2, 0), (2, 0)));
 
         let next = tick(&state);
 
-        assert_eq!(next.robots[0].pos, (2, 0));
+        assert_ne!(next.robots[0].goal, (2, 0), "arriving at a patrol point should immediately assign the next one");
+        assert_eq!(next.robots[0].pos, (3, 0), "the robot should already be moving toward the new patrol goal");
     }
 
     #[test]
@@ -410,13 +432,13 @@ mod tests {
     }
 
     #[test]
-    fn leg_cycle_progress_does_not_advance_once_at_goal() {
+    fn leg_cycle_progress_advances_when_patrol_reassignment_causes_movement() {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (2, 0), (2, 0)));
 
         let next = tick(&state);
 
-        assert_eq!(next.robots[0].leg_cycle_progress, 0.0);
+        assert!(next.robots[0].leg_cycle_progress > 0.0, "moving toward the new patrol goal should advance the gait cycle");
     }
 
     #[test]
@@ -617,10 +639,32 @@ mod tests {
         state = tick(&state);
         assert_eq!(state.robots[0].facing, Direction::West);
 
-        // 목표 지점에 도달해 멈춘 뒤에도 마지막 방향을 유지해야 한다.
-        let settled = state.robots[0].pos;
-        state.robots[0].goal = settled;
+        // 정지 상태에서도 마지막 방향을 유지해야 한다 — 이제 "목표 도착"은
+        // 곧바로 다음 순찰 목표로 재배정되어 다시 움직이므로 더 이상
+        // "정지"를 의미하지 않는다. 진짜로 멈춘 상태를 만들려면 Failed로
+        // 만든다 — plan_robot()이 이동/재계획/순찰 재배정을 전부 건너뛴다.
+        state.robots[0].status = RobotStatus::Failed;
         let held = tick(&state);
         assert_eq!(held.robots[0].facing, Direction::West);
+    }
+
+    #[test]
+    fn patrol_points_are_always_distinct_for_a_reasonably_sized_grid() {
+        let grid = Grid::new(10, 10);
+        for id in 0..20u32 {
+            let (a, b) = patrol_points(id, &grid);
+            assert_ne!(a, b, "patrol points must differ for id {id}");
+        }
+    }
+
+    #[test]
+    fn next_patrol_goal_alternates_between_the_two_patrol_points() {
+        let grid = Grid::new(10, 10);
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        let (a, b) = patrol_points(1, &grid);
+        robot.goal = a;
+        assert_eq!(next_patrol_goal(&robot, &grid), b);
+        robot.goal = b;
+        assert_eq!(next_patrol_goal(&robot, &grid), a);
     }
 }
