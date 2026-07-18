@@ -22,6 +22,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 prometheus = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = { version = "0.5", features = ["fs"] }
 
 [dev-dependencies]
 proptest = "1"

@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tower_http::services::ServeDir;
 use ws::{ws_route, Broadcaster, SharedState};
 
 type DbHandle = Arc<StdMutex<rusqlite::Connection>>;
@@ -270,6 +271,7 @@ pub fn build_app(
     db: DbHandle,
     config: ConfigHandle,
     metrics: MetricsHandle,
+    static_dir: String,
 ) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -278,6 +280,7 @@ pub fn build_app(
         .route("/api/robots/failures", get(robot_failures))
         .route("/api/config", get(get_config).post(post_config))
         .route("/metrics", get(metrics_route))
+        .fallback_service(ServeDir::new(static_dir))
         .with_state(state)
         .layer(axum::extract::Extension(broadcaster))
         .layer(axum::extract::Extension(sessions))
@@ -295,6 +298,15 @@ pub fn build_app(
 /// 환경에서만 `GAMEROBOTFACTORY_BIND_ADDR`로 오버라이드한다.
 fn resolve_bind_addr(env_value: Option<&str>) -> String {
     env_value.unwrap_or("127.0.0.1:0").to_string()
+}
+
+/// 클라이언트 빌드 산출물(`client/dist/`)을 서빙할 디렉토리 경로도 같은
+/// 이유(env var 직접 읽기 금지, 병렬 테스트 안전)로 파라미터화한다.
+/// 기본값 `client/dist`는 로컬 `cargo run`을 저장소 루트에서 실행할 때
+/// 상대경로로 맞는 값 — Docker에서는 `GAMEROBOTFACTORY_STATIC_DIR`로
+/// 절대경로(`/app/client-dist`)를 넘긴다.
+fn resolve_static_dir(env_value: Option<&str>) -> String {
+    env_value.unwrap_or("client/dist").to_string()
 }
 
 /// 포트를 고정하지 않고 OS가 빈 포트를 골라주게 한다(`:0`) — 통합테스트
@@ -326,7 +338,8 @@ async fn main() {
 
     spawn_tick_loop(state.clone(), broadcaster.clone(), db.clone(), config.clone(), metrics.clone());
 
-    let app = build_app(state, broadcaster, sessions, db, config, metrics);
+    let static_dir = resolve_static_dir(std::env::var("GAMEROBOTFACTORY_STATIC_DIR").ok().as_deref());
+    let app = build_app(state, broadcaster, sessions, db, config, metrics, static_dir);
 
     let bind_addr = resolve_bind_addr(std::env::var("GAMEROBOTFACTORY_BIND_ADDR").ok().as_deref());
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -460,5 +473,15 @@ mod tests {
     #[test]
     fn resolve_bind_addr_uses_env_value_when_set() {
         assert_eq!(resolve_bind_addr(Some("0.0.0.0:8080")), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn resolve_static_dir_defaults_to_client_dist_when_unset() {
+        assert_eq!(resolve_static_dir(None), "client/dist");
+    }
+
+    #[test]
+    fn resolve_static_dir_uses_env_value_when_set() {
+        assert_eq!(resolve_static_dir(Some("/app/client-dist")), "/app/client-dist");
     }
 }
