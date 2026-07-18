@@ -2,12 +2,13 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import path from 'node:path'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 export interface SpawnedServer {
   process: ChildProcess
   port: number
+  dbDir: string
 }
 
 function resolveServerBinaryPath(): string {
@@ -51,9 +52,35 @@ export async function spawnServer(): Promise<SpawnedServer> {
     })
   })
 
-  return { process: child, port }
+  return { process: child, port, dbDir }
 }
 
-export function stopServer(server: SpawnedServer): void {
-  server.process.kill()
+/** 서버 프로세스를 종료하고 임시 SQLite 디렉토리를 정리한다.
+ * Windows에서는 프로세스가 실제로 종료되어 파일 핸들을 놓기까지
+ * `kill()` 호출 이후에도 시간이 걸리므로(EBUSY), exit 이벤트를 기다린 뒤
+ * rmSync를 짧은 간격으로 재시도한다. 정리 실패는 테스트 결과에 영향을
+ * 주지 않도록 최종적으로도 무시한다. */
+export async function stopServer(server: SpawnedServer): Promise<void> {
+  await new Promise<void>((resolve) => {
+    if (server.process.exitCode !== null || server.process.signalCode !== null) {
+      resolve()
+      return
+    }
+    server.process.once('exit', () => resolve())
+    server.process.kill()
+  })
+
+  const maxAttempts = 10
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      rmSync(server.dbDir, { recursive: true, force: true })
+      return
+    } catch {
+      if (attempt === maxAttempts - 1) {
+        // 정리 실패는 무시 — 테스트 결과에 영향 주지 않는다
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
 }

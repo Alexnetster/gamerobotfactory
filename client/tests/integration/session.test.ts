@@ -13,8 +13,8 @@ beforeAll(async () => {
   server = await spawnServer()
 })
 
-afterAll(() => {
-  stopServer(server)
+afterAll(async () => {
+  await stopServer(server)
 })
 
 function connect(port: number): Promise<WebSocket> {
@@ -43,52 +43,65 @@ function nextMessage(ws: WebSocket): Promise<ServerMessage> {
 describe('client state layer against a real running server', () => {
   it('mirrors an initial empty Snapshot from the real server', async () => {
     const ws = await connect(server.port)
-    const first = await nextMessage(ws)
-    ws.close()
+    try {
+      const first = await nextMessage(ws)
 
-    expect(first.kind).toBe('Snapshot')
-    const mirror: MirrorState = applyServerMessage(createEmptyMirror(), first)
-    expect(mirror.robots.size).toBe(0)
+      expect(first.kind).toBe('Snapshot')
+      const mirror: MirrorState = applyServerMessage(createEmptyMirror(), first)
+      expect(mirror.robots.size).toBe(0)
+    } finally {
+      ws.close()
+    }
   })
 
   it('reflects SetRobotCount into the local mirror, including facing/path/arm_pose', async () => {
     const ws = await connect(server.port)
-    await nextMessage(ws) // 초기 스냅샷 소비
+    try {
+      await nextMessage(ws) // 초기 스냅샷 소비
 
-    ws.send(encodeClientCommand({ type: 'SetRobotCount', count: 2 }))
+      ws.send(encodeClientCommand({ type: 'SetRobotCount', count: 2 }))
 
-    let mirror: MirrorState = createEmptyMirror()
-    const deadline = Date.now() + 5000
-    while (mirror.robots.size < 2 && Date.now() < deadline) {
-      const msg = await nextMessage(ws)
-      mirror = applyServerMessage(mirror, msg)
-    }
-    ws.close()
+      let mirror: MirrorState = createEmptyMirror()
+      const deadline = Date.now() + 5000
+      while (mirror.robots.size < 2 && Date.now() < deadline) {
+        const msg = await nextMessage(ws)
+        mirror = applyServerMessage(mirror, msg)
+      }
 
-    expect(mirror.robots.size).toBe(2)
-    for (const robot of mirror.robots.values()) {
-      expect(['North', 'East', 'South', 'West']).toContain(robot.facing)
-      expect(Array.isArray(robot.path)).toBe(true)
-      expect(typeof robot.arm_pose.shoulder_angle).toBe('number')
+      expect(mirror.robots.size).toBe(2)
+      for (const robot of mirror.robots.values()) {
+        expect(['North', 'East', 'South', 'West']).toContain(robot.facing)
+        expect(Array.isArray(robot.path)).toBe(true)
+        expect(typeof robot.arm_pose.shoulder_angle).toBe('number')
+      }
+    } finally {
+      ws.close()
     }
   })
 
   it('resyncs after Resume with a valid session id', async () => {
     const ws1 = await connect(server.port)
-    const snapshot = await nextMessage(ws1)
-    if (snapshot.kind !== 'Snapshot') throw new Error('expected Snapshot')
-    const sessionId = snapshot.session_id
-    ws1.close()
+    let sessionId: string
+    try {
+      const snapshot = await nextMessage(ws1)
+      if (snapshot.kind !== 'Snapshot') throw new Error('expected Snapshot')
+      sessionId = snapshot.session_id
+    } finally {
+      ws1.close()
+    }
 
     const ws2 = await connect(server.port)
-    await nextMessage(ws2) // 재접속도 항상 새 Snapshot을 먼저 보낸다
-    ws2.send(encodeClientCommand({ type: 'Resume', session_id: sessionId }))
-    const ack = await nextMessage(ws2)
-    ws2.close()
+    try {
+      await nextMessage(ws2) // 재접속도 항상 새 Snapshot을 먼저 보낸다
+      ws2.send(encodeClientCommand({ type: 'Resume', session_id: sessionId }))
+      const ack = await nextMessage(ws2)
 
-    expect(ack.kind).toBe('ResumeAck')
-    if (ack.kind === 'ResumeAck') {
-      expect(ack.resumed).toBe(true)
+      expect(ack.kind).toBe('ResumeAck')
+      if (ack.kind === 'ResumeAck') {
+        expect(ack.resumed).toBe(true)
+      }
+    } finally {
+      ws2.close()
     }
   })
 })
