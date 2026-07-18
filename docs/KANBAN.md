@@ -66,6 +66,7 @@
 서버가 계산하는 로봇팔 컨베이어 시뮬레이션을 아이소메트릭 캔버스로 렌더링하고 우측 사이드바로 커맨드를 보내는 Vite+TS 웹 클라이언트. 13개 태스크 중 진행 중.
 
 - **Task 1 완료** — `sim_core`에 `Direction` 타입(North/East/South/West) + `Robot.facing` 필드 + 실제 이동에서만 갱신되는 방향 추적 (`cc8cfa2d17454219745ebd467fbbb99ac67083da`) — 타이브레이크에서 진 로봇(제자리에 남는 로봇)의 `facing`이 바뀌면 안 된다는 점을 테스트로 못박음. 129개 테스트 통과, clippy 경고 0개. 테스트 픽스처 편차 하나: `facing_holds_last_direction_while_stationary`가 목표 지점에 도달해 정지한 뒤에도 마지막 이동 방향을 유지하는지까지 같은 테스트 안에서 연쇄적으로 확인(동→서 방향전환 후 정지까지 한 흐름으로 검증).
+- **Task 2 완료** — `protocol.rs`의 `RobotView`에 `path`/`facing`/`arm_pose` 노출 + 자세(`pose`)를 위치가 아니라 `task` 기반으로 전환, 죽어있던 `Robot.pose` 필드 제거 (`188b23c`) — `arm_pose`는 `ik.rs`/`posture.rs`(지금까지 자기 자신의 유닛테스트에서만 돌던 코드)를 실제로 처음 런타임에서 호출하는 지점: `task == Idle`이면 고정된 `IDLE_ARM_POSE`, 아니면 `world_target_to_body_local` → `solve_two_bone_ik`로 실제 IK를 풂. 계획에 없던 편차 하나: `main.rs`의 테스트 헬퍼(`sample_robot_view`)도 `RobotView` 리터럴을 만들고 있어서 `delta.rs`와 똑같은 이유로 컴파일이 깨졌음 — 계획서가 놓친 4번째 지점이라 `delta.rs` 헬퍼와 같은 패턴(빈 path, `WireDirection::East`, idle arm pose)으로 동일하게 고침. 135개 테스트 통과(129 + 신규 6개: path/facing/pose idle↔working/arm_pose idle rest/arm_pose IK 유한값/arm_pose가 task·facing만 같으면 로봇이 달라도 동일 — 델타 압축 전제조건 고정), clippy 경고 0개.
 
 ## Backlog
 
