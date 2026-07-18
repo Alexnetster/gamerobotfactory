@@ -27,6 +27,15 @@ function setupLayout(): { canvas: HTMLCanvasElement; sidebarContainer: HTMLEleme
 
   const canvas = document.createElement('canvas')
   canvas.style.flex = '1'
+  // <canvas>는 대체 요소(replaced element)라 기본 width/height 속성(300x150,
+  // 2:1 비율)이 flex 아이템의 자동 min-width 계산에 그대로 들어간다. 세로
+  // 축(cross-axis)이 컨테이너 높이만큼 stretch되면, 그 비율을 유지하려는
+  // 자동 최소 너비가 (stretch된 높이 × 2)로 튀어올라 flex-basis:0/grow와
+  // 무관하게 캔버스가 훨씬 넓게 잡히고 사이드바가 화면 밖으로 밀려난다
+  // (Playwright E2E로 실측: 뷰포트 1000px인데 캔버스가 1400px로 렌더링됨).
+  // min-width:0으로 이 자동 최소값을 꺼야 flex-grow/shrink가 실제 남는
+  // 공간(뷰포트 - 사이드바)에 맞춰 캔버스 크기를 정상적으로 계산한다.
+  canvas.style.minWidth = '0'
   app.appendChild(canvas)
 
   const sidebarContainer = document.createElement('div')
