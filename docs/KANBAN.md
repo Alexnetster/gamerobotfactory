@@ -60,10 +60,16 @@
 
 **로봇 내구도/고장/복구 전체 완료.** 123개 테스트 통과(Plan 3 종료 시점 85개에서 +38개), clippy 경고 0개. 인프라 레벨 장애 격리(`safe_tick`/`tick_panics_total`) 서사를 시뮬레이션 도메인(로봇 고장)까지 일관되게 확장 — 결정적 해시 기반 확률 판정으로 `rayon` 병렬 틱의 순수성 유지, 델타 압축 회귀를 막기 위한 내구도 값 양자화, 뮤테이션 테스트로 잡아낸 실질 문제 2건(Task 1의 장애물 테스트, Task 7의 중복 발화 테스트 커버리지 갭), proptest가 실제로 찾아낸 미문서화 동작 1건(Task 8의 복구 완료 동틱 이동) 전부 리뷰에서 발견·해소·문서화됨.
 
+## In Progress
+
+### Plan 4 — 클라이언트 렌더링 (`docs/superpowers/specs/2026-07-17-client-rendering-design.md`, 계획서 `docs/superpowers/plans/2026-07-18-client-rendering-plan.md`)
+서버가 계산하는 로봇팔 컨베이어 시뮬레이션을 아이소메트릭 캔버스로 렌더링하고 우측 사이드바로 커맨드를 보내는 Vite+TS 웹 클라이언트. 13개 태스크 중 진행 중.
+
+- **Task 1 완료** — `sim_core`에 `Direction` 타입(North/East/South/West) + `Robot.facing` 필드 + 실제 이동에서만 갱신되는 방향 추적 (`cc8cfa2d17454219745ebd467fbbb99ac67083da`) — 타이브레이크에서 진 로봇(제자리에 남는 로봇)의 `facing`이 바뀌면 안 된다는 점을 테스트로 못박음. 129개 테스트 통과, clippy 경고 0개. 테스트 픽스처 편차 하나: `facing_holds_last_direction_while_stationary`가 목표 지점에 도달해 정지한 뒤에도 마지막 이동 방향을 유지하는지까지 같은 테스트 안에서 연쇄적으로 확인(동→서 방향전환 후 정지까지 한 흐름으로 검증).
+
 ## Backlog
 
-### Plan 4~5 (아직 계획 문서 없음, 설계문서 로드맵만 있음)
-- **Plan 4** — 클라이언트 렌더링 (`client/` 디렉토리 자체가 아직 없음 — Vite+TS+Canvas, 아이소메트릭 투영)
+### Plan 5 (아직 계획 문서 없음, 설계문서 로드맵만 있음)
 - **Plan 5** — 데모/배포 (데모 영상, Docker, 성능 목표 실측 — README 자체는 완료됨)
 
 ### 관측가능성/견고성 (Plan 3 리뷰에서 나왔으나 지금은 안 고친 것)
