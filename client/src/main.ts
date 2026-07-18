@@ -9,14 +9,11 @@ import { gridToScreen } from './render/projection'
 import { Sidebar } from './ui/sidebar'
 import type { ServerMessage } from './net/protocol'
 import type { WebSocketLike } from './net/connection'
+import { resolveWsUrl } from './net/resolve-ws-url'
 
 // U자 컨베이어가 이소메트릭 각도에서 알아볼 수 있는 최소 크기(브레인스토밍
 // 목업 기준 7x6 이상 권장).
 const GRID_SIZE = { width: 9, height: 7 }
-
-function resolveWsUrl(): string | null {
-  return new URLSearchParams(location.search).get('ws')
-}
 
 function setupLayout(): { canvas: HTMLCanvasElement; sidebarContainer: HTMLElement } {
   const app = document.getElementById('app')
@@ -54,18 +51,13 @@ function setupLayout(): { canvas: HTMLCanvasElement; sidebarContainer: HTMLEleme
 }
 
 function main(): void {
-  const wsUrl = resolveWsUrl()
+  const wsUrl = resolveWsUrl(location.search, location.protocol, location.host)
   const { canvas, sidebarContainer } = setupLayout()
   const ctx2d = canvas.getContext('2d')
   if (!ctx2d) {
     throw new Error('2D canvas context unavailable')
   }
   const ctx: CanvasRenderingContext2D = ctx2d
-
-  if (!wsUrl) {
-    sidebarContainer.textContent = '서버 WS URL이 지정되지 않았습니다 — ?ws=ws://127.0.0.1:<포트>/ws 로 접속하세요.'
-    return
-  }
 
   let mirror: MirrorState = createEmptyMirror()
   let prevSnapshot: TickSnapshot | null = null
