@@ -1034,7 +1034,7 @@ git add client/scripts/perf-metrics.mjs client/scripts/perf-metrics.test.mjs cli
 git commit -m "feat: 배포된 URL 대상 성능 실측 스크립트 추가(+ 파싱 로직 유닛테스트)"
 ```
 
-**실제 배포된 URL 대상 실행은 배포 완료 후 진행** — 사용자가 배포 URL을 알려주면 그때 같이 실행해서 README "성능 목표" 절에 실측치를 반영한다(다음 Task 9의 README 갱신에서 자리 표시만 해두고, 실측치는 배포 후 별도로 채운다).
+**실제 배포된 URL 대상 실행은 배포 완료 후 진행** — 사용자가 배포 URL을 알려주면 그때 같이 실행해서 README "성능 목표" 절에 실측치를 반영한다(다음 Task 10의 README 갱신에서 자리 표시만 해두고, 실측치는 배포 후 별도로 채운다).
 
 ---
 
