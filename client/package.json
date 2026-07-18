@@ -11,7 +11,8 @@
     "pretest": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:scripts": "node --test scripts/*.test.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",

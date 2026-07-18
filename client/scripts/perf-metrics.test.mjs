@@ -29,3 +29,17 @@ gamerobotfactory_tick_duration_seconds_bucket{le="+Inf"} 10
 `
   assert.equal(parseTickDurationP99(withOnlyInf), 0.001)
 })
+
+test('uses the 99th percentile, not the 95th (buckets chosen so they land in different buckets)', () => {
+  // total=1000
+  // p95 target=950 -> le="0.001"(900) < 950, le="0.005"(960) >= 950 => 0.005
+  // p99 target=990 -> le="0.005"(960) < 990, le="0.01"(995) >= 990 => 0.01
+  // 0.005 !== 0.01이므로, 구현이 0.95를 쓰면 이 테스트는 실패한다.
+  const finegrained = `
+gamerobotfactory_tick_duration_seconds_bucket{le="0.001"} 900
+gamerobotfactory_tick_duration_seconds_bucket{le="0.005"} 960
+gamerobotfactory_tick_duration_seconds_bucket{le="0.01"} 995
+gamerobotfactory_tick_duration_seconds_bucket{le="+Inf"} 1000
+`
+  assert.equal(parseTickDurationP99(finegrained), 0.01)
+})

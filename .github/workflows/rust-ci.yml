@@ -69,6 +69,10 @@ jobs:
         working-directory: client
         run: npm test
 
+      - name: Perf script unit tests (node --test)
+        working-directory: client
+        run: npm run test:scripts
+
       - name: Integration tests (real server binary + real ws client)
         working-directory: client
         run: npm run test:integration
