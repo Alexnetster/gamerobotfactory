@@ -3,3 +3,4 @@ dist/
 playwright-report/
 test-results/
 tests/e2e/.server-info.json
+*.tsbuildinfo

@@ -5,6 +5,7 @@ import type { MirrorState } from './state/mirror'
 import { computeRenderRobots } from './state/interpolation'
 import type { TickSnapshot } from './state/interpolation'
 import { drawScene } from './render/canvas'
+import { gridToScreen } from './render/projection'
 import { Sidebar } from './ui/sidebar'
 import type { ServerMessage } from './net/protocol'
 import type { WebSocketLike } from './net/connection'
@@ -134,9 +135,8 @@ function main(): void {
     let closestId: number | null = null
     let closestDist = Infinity
     for (const robot of rendered) {
-      const screenX = (robot.renderPos.x - robot.renderPos.y) * 32
-      const screenY = (robot.renderPos.x + robot.renderPos.y) * 16
-      const dist = Math.hypot(screenX - clickX, screenY - clickY)
+      const screen = gridToScreen(robot.renderPos.x, robot.renderPos.y)
+      const dist = Math.hypot(screen.x - clickX, screen.y - clickY)
       if (dist < closestDist) {
         closestDist = dist
         closestId = robot.id
