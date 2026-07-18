@@ -80,10 +80,14 @@
 
 **Plan 4 전체 완료.** 서버 135개 테스트 통과(로봇 내구도 종료 시점 123개에서 Plan 4 Task 1~2가 추가한 `facing`/`arm_pose`/`path` 관련 테스트 +12개), clippy 경고 0개. 클라이언트는 vitest 단위 46개(8개 파일, 순수 로직 전반 뮤테이션 테스트 병행) + 통합 3개(실 서버 바이너리 스폰 + 진짜 `ws` 클라이언트) + Playwright E2E 2개(실 서버 + 빌드된 클라이언트 + 실제 Chromium, 캔버스 픽셀 샘플링/DOM 단언) — 전부 3회 반복 실행으로 플레이키니스 없음 확인. 리뷰에서 실제로 잡은 버그: `Connection.close()` 중 대기 중이던 재접속 타이머가 취소 안 되던 레이스(Task 8), 클릭 히트테스트가 이소메트릭 공식을 손으로 복제해 투영 상수가 바뀌면 조용히 어긋날 위험(Task 11), Windows에서 `process.kill()` 직후 SQLite 파일 핸들이 안 풀려 생기던 임시 디렉토리 정리 실패(Task 12), `<canvas>`의 자동 min-width로 사이드바가 화면 밖으로 밀려나던 flex 레이아웃 버그와 뮤테이션 테스트로 잡은 공허한 E2E 테스트 2건(Task 13). Plan 1부터 존재했지만 자기 유닛테스트에서만 불리던 `ik.rs`/`posture.rs`가 Plan 4에서 처음 실제 런타임에 배선됨(`protocol.rs`의 `pose_for`/`arm_pose_for` 경유). 로봇 50대 기준 실측 평균 프레임 시간 16.2~16.3ms(≈61~62fps)로 설계문서 성능 목표를 만족.
 
-## Backlog
+## In Progress
 
-### Plan 5 (아직 계획 문서 없음, 설계문서 로드맵만 있음)
-- **Plan 5** — 데모/배포 (데모 영상, Docker, 성능 목표 실측 — README 자체는 완료됨)
+### Plan 5 — 데모/배포 (`docs/superpowers/specs/2026-07-18-demo-deploy-design.md`, 계획서 `docs/superpowers/plans/2026-07-18-demo-deploy-plan.md`)
+Docker 단일 컨테이너 배포 + Fly.io 호스팅 + 데모 영상 + 성능 실측으로 마무리하는 마지막 Plan. 9개 태스크 중 1개 완료.
+
+- **Task 1 완료** — `server/src/main.rs`에 `resolve_bind_addr` 순수 함수 추가 + `main()` 배선 (`2af1277`) — `main()`이 `std::env::var`를 직접 부르면 유닛테스트가 프로세스 전역 상태를 건드려 병렬 테스트와 레이스가 생기는 것을 피하려고 env var 읽기와 기본값 결정을 분리. 기본값은 기존 동작과 동일한 `127.0.0.1:0`이고, `GAMEROBOTFACTORY_BIND_ADDR`가 설정된 경우에만 오버라이드(Docker/배포 환경에서 `0.0.0.0:<포트>`로 바인드하기 위한 사전 작업 — 지금까지의 루프백+임의포트는 컨테이너 밖에서 전혀 접근 불가능했음). TDD로 진행: 테스트 먼저 작성 → `cannot find function 'resolve_bind_addr'` 컴파일 실패 확인 → 구현 → 137/137 통과(기존 135 + 신규 2) 확인. `cargo clippy --all-targets -- -D warnings` 경고 0개. 기존 통합테스트(`ws_integration`/`rest_integration`, 12개)가 아무도 `GAMEROBOTFACTORY_BIND_ADDR`를 건드리지 않으므로 기본값 그대로 영향받지 않음을 별도로 재확인.
+
+## Backlog
 
 ### 관측가능성/견고성 (Plan 3 리뷰에서 나왔으나 지금은 안 고친 것)
 - `spawn_tick_loop`의 틱 루프 몸체는 `safe_tick`(`sim_core::sim::tick` 호출부)만 패닉 격리돼 있고, 그 바깥(생산량 집계/스냅샷 변환/델타 계산 등)에서 패닉이 나면 틱 루프 태스크 자체가 죽어 서버가 조용히 멈춘다(`/health`는 여전히 "ok"). 지금 당장 고치기엔 설계 판단(전체를 `catch_unwind`로 감쌀지, 태스크 재시작 감독자를 둘지)이 필요해 보류. (Task 7 리뷰)
@@ -98,7 +102,7 @@
 
 ## 현재 건강도 스냅샷
 
-- `cargo test --manifest-path server/Cargo.toml`: 135/135 통과 (Plan 4 Task 1~2가 `facing`/`arm_pose`/`path` 관련 테스트를 로봇 내구도 종료 시점 123개에서 +12개 추가)
+- `cargo test --manifest-path server/Cargo.toml`: 137/137 통과 (Plan 4 Task 1~2가 `facing`/`arm_pose`/`path` 관련 테스트를 로봇 내구도 종료 시점 123개에서 +12개 추가, Plan 5 Task 1이 `resolve_bind_addr` 테스트 +2개 추가)
 - `cargo clippy --all-targets -- -D warnings`: 경고 0개
 - `vitest` (`client/`): 유닛 46/46 (`npm test`, 8개 파일) + 통합 3/3 (`npm run test:integration`, 실 서버 바이너리 스폰) + E2E 2/2 (`npm run test:e2e`, Playwright — 실 서버+빌드된 클라이언트+실제 Chromium) + `npm run typecheck` 에러 없음 — Plan 4 Task 14에서 전부 3회 반복 실행으로 플레이키니스 없음 확인
 - 클라이언트 렌더링 성능(로봇 50대, 실 서버+`npm run dev`+Chromium, 30프레임 표본, 3회 측정): 평균 프레임 시간 16.18ms/16.30ms/16.22ms(≈61.4~61.8fps) — 설계문서 목표(60fps 근처, ~16.7ms) 충족
