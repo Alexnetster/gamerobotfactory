@@ -199,7 +199,7 @@ primary_region = "nrt"    # 실제 배포 시 원하는 리전으로 교체
 
 로컬 `docker compose up`으로 띄운 실제 컨테이너를 대상으로 녹화한다(배포 없이도 완결 가능, 배포 아티팩트와 동일한 이미지를 검증하는 효과도 있음).
 
-`scripts/record-demo.mjs`(신규, `client/tests/`가 아니라 저장소 루트의 별도 `scripts/` — 애플리케이션 테스트가 아니라 마케팅 자산 생성 스크립트이므로 vitest/playwright 설정 대상에서 제외):
+`client/scripts/record-demo.mjs`(신규, `client/tests/`가 아니라 `client/scripts/` — 애플리케이션 테스트가 아니라 마케팅 자산 생성 스크립트이므로 vitest/playwright 설정 대상에서 제외. 저장소 루트가 아니라 `client/` 안에 두는 이유: Node의 모듈 해석은 스크립트 파일 자신의 경로 기준으로 `node_modules`를 찾으므로, 저장소 루트에 두면 `client/node_modules`의 `@playwright/test`/`ws`를 못 찾는다 — 계획 단계에서 실제로 재현 확인):
 
 ```js
 import { chromium } from 'playwright'
@@ -247,16 +247,16 @@ async function main() {
 main()
 ```
 
-실행: `docker compose up -d` → `node scripts/record-demo.mjs` → `docker compose down`. 산출물은 `demo-recordings/*.webm`(Playwright 기본 포맷) — README에 상대경로로 링크하거나, 필요시 사용자가 직접 mp4/GIF로 변환(이 환경엔 ffmpeg가 없어 자동 변환은 스코프 밖).
+실행(저장소 루트에서): `docker compose up -d` → `node client/scripts/record-demo.mjs` → `docker compose down`. 산출물은 `demo-recordings/*.webm`(Playwright 기본 포맷) — README에 상대경로로 링크하거나, 필요시 사용자가 직접 mp4/GIF로 변환(이 환경엔 ffmpeg가 없어 자동 변환은 스코프 밖).
 
 ## 성능 실측
 
 ### 부하 스크립트
 
-`scripts/perf-check.mjs`(신규) — 원격 URL을 인자로 받아 로봇 수를 늘리고 `/metrics`를 폴링한다. 파싱 로직은 순수 함수로 분리해 유닛테스트 대상으로 삼는다:
+`client/scripts/perf-check.mjs`(신규) — 원격 URL을 인자로 받아 로봇 수를 늘리고 `/metrics`를 폴링한다. 파싱 로직은 순수 함수로 분리해 유닛테스트 대상으로 삼는다(Node 내장 `node --test`로, 저장소 루트가 아니라 `client/scripts/`에 두는 이유는 위와 동일):
 
 ```js
-// scripts/perf-metrics.mjs — 순수 함수, 유닛테스트 대상
+// client/scripts/perf-metrics.mjs — 순수 함수, 유닛테스트 대상
 export function parseTickDurationP99(metricsText) {
   // Prometheus 히스토그램 텍스트에서 gamerobotfactory_tick_duration_seconds_bucket 라인들을 파싱해
   // 누적 카운트 기준 99번째 백분위에 해당하는 버킷 상한(le)을 근사치로 반환한다.
@@ -276,14 +276,14 @@ export function parseTickDurationP99(metricsText) {
 }
 ```
 
-`scripts/perf-check.mjs`(I/O 래퍼, 순수 함수 재사용):
+`client/scripts/perf-check.mjs`(I/O 래퍼, 순수 함수 재사용):
 
 ```js
 import { parseTickDurationP99 } from './perf-metrics.mjs'
 
 const BASE_URL = process.argv[2]
 if (!BASE_URL) {
-  console.error('사용법: node scripts/perf-check.mjs <배포된 URL>')
+  console.error('사용법: node client/scripts/perf-check.mjs <배포된 URL>')
   process.exit(1)
 }
 
@@ -311,7 +311,7 @@ main()
 
 ### 실행 절차 (배포 완료 후)
 
-README에 다음을 명시: `node scripts/perf-check.mjs https://<배포된 URL>` 실행 → 출력된 `robot_count`/p99 값을 README "성능 목표" 절에 실측치로 기록. **이 스크립트 자체는 이번 세션에서 완성하지만, 실제 실행(배포된 URL 대상)은 배포 완료 후 진행** — 사용자가 배포 URL을 알려주면 그때 같이 실행해서 README에 반영한다.
+README에 다음을 명시(저장소 루트에서 실행): `node client/scripts/perf-check.mjs https://<배포된 URL>` 실행 → 출력된 `robot_count`/p99 값을 README "성능 목표" 절에 실측치로 기록. **이 스크립트 자체는 이번 세션에서 완성하지만, 실제 실행(배포된 URL 대상)은 배포 완료 후 진행** — 사용자가 배포 URL을 알려주면 그때 같이 실행해서 README에 반영한다.
 
 ## README 갱신 항목
 
