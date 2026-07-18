@@ -6,12 +6,24 @@
 
 **이어서 작업할 때는 이 문서 대신 [`docs/KANBAN.md`](docs/KANBAN.md)부터 봐야 한다** — 완료/진행/남은 작업이 커밋 SHA와 함께 정리돼 있고, "다음 카드"가 뭔지도 거기 나와 있다. 이 README는 외부 공개용 요약이라 최신 작업 상태 추적용으로는 KANBAN.md보다 부정확하다.
 
+## 퀵스타트
+
+**라이브 데모**: <배포 URL — flyctl deploy 후 채움>를 열면 클론/설치 없이 바로 체험 가능(아직 실제 배포 전이라 자리 표시만 있음 — 배포는 본인 Fly.io 계정으로 진행하는 별도 단계, 자세한 건 아래 "배포" 절 참고).
+
+**로컬에서**: 저장소를 클론한 뒤
+
+```bash
+docker compose up
+```
+
+만 실행하면 `http://localhost:8080`에서 서버+클라이언트가 하나의 컨테이너로 뜬다.
+
 ## 핵심 엔지니어링 결정
 
 - **결정적 병렬 틱**: 매 틱 `rayon`으로 로봇들을 병렬 갱신하되, 직전 틱의 스냅샷만 읽는 더블 버퍼링 + 로봇 ID 기반 타이브레이크로 동시 이동 충돌을 결정적으로 해소한다. 몇 번을 돌려도 같은 입력이면 같은 결과가 나온다 — `tick_is_deterministic`/`tick_never_produces_collisions` proptest로 검증.
 - **장애 격리**: 로봇 한 대의 갱신 로직이 패닉해도(`catch_unwind`) 그 틱은 스킵될 뿐 나머지 로봇과 다른 클라이언트 연결에는 영향이 없다. `safe_tick`이 스킵된 틱 수를 `tick_panics_total` 메트릭으로 노출한다 — "조용히 멈추는" 실패를 관측 가능하게 만든 것.
 - **클라이언트별 델타 동기화 + 무손실 재접속**: 매 틱 전체 상태 대신 바뀐 로봇만 보내고(`Delta`), 연결이 브로드캐스트 채널 용량을 넘겨 뒤처지면(Lagged) 끊는 대신 전체 스냅샷으로 재동기화한다. 세션 토큰(UUID)으로 30초 유예시간 내 재접속을 지원.
-- **성능 목표를 실측 가능하게**: 틱 처리시간(락 획득~스냅샷/델타 계산)을 `tick_duration_seconds` Prometheus 히스토그램으로 노출한다 — 목표(p99 < 10ms, 20Hz 틱 예산 50ms)를 정확히 버킷 경계로 잡아둬서 `histogram_quantile`로 바로 조회 가능. "성능 목표를 문서에만 적어두고 측정 수단이 없는" 흔한 함정을 피한 것.
+- **성능 목표를 실측 가능하게**: 틱 처리시간(락 획득~스냅샷/델타 계산)을 `tick_duration_seconds` Prometheus 히스토그램으로 노출한다 — 목표(p99 < 10ms, 20Hz 틱 예산 50ms)를 정확히 버킷 경계로 잡아둬서 `histogram_quantile`로 바로 조회 가능. "성능 목표를 문서에만 적어두고 측정 수단이 없는" 흔한 함정을 피한 것. (배포 환경 실측치: 배포 완료 후 기록 예정 — `client/scripts/perf-check.mjs <실제 URL>`로 측정하는 스크립트는 이미 준비돼 있음.)
 - **리뷰로 잡아낸 실질 버그들**: 통합테스트 중 하나가 "그럴듯해 보이지만 실제로는 아무것도 검증하지 않는" 공허한 테스트였음을 뮤테이션 테스트(동작을 일부러 깨고 테스트가 여전히 통과하는지 확인)로 발견해 재작성했고, `SetRobotCount`에 상한이 없어 무제한 메모리 할당으로 서버를 멈출 수 있었던 DoS 버그도 리뷰 과정에서 잡았다. 자세한 내용은 [`docs/KANBAN.md`](docs/KANBAN.md) 참고.
 
 ## 아키텍처
@@ -48,12 +60,14 @@ npm run dev
 # 서버 빌드
 cargo build --manifest-path server/Cargo.toml
 
-# 서버 테스트 전체 실행 (135개, 인테그레이션 테스트 일부는 실제 서버 바이너리를 띄워 수 초 소요)
+# 서버 테스트 전체 실행 (143개, 인테그레이션 테스트 일부는 실제 서버 바이너리를 띄워 수 초 소요)
 cargo test --manifest-path server/Cargo.toml
 
 # 서버 린트
 cargo clippy --manifest-path server/Cargo.toml --all-targets
 ```
+
+- Docker/Fly.io 배포 관련 파일도 저장소 루트/`client/`에 있다: `Dockerfile`(3단계 멀티스테이지 빌드), `docker-compose.yml`(로컬에서 배포 이미지와 동일하게 실행), `fly.toml`(Fly.io 배포 설정), `.dockerignore`. `client/scripts/`엔 애플리케이션 코드가 아니라 1회성 도구 스크립트가 있다: `record-demo.mjs`(Playwright로 데모 영상 자동 녹화), `perf-metrics.mjs`/`perf-metrics.test.mjs`(성능 메트릭 파싱 순수 함수 + `node --test` 유닛테스트), `perf-check.mjs`(배포된 URL에 실제로 접속해 성능을 실측하는 I/O 래퍼).
 
 ## 동작 환경
 
@@ -200,11 +214,12 @@ curl http://127.0.0.1:54321/metrics
 - **Plan 3~4 사이 보강**: 설계문서가 요구하는 틱 처리시간 p99 목표를 실제로 측정할 수 있도록 `tick_duration_seconds` 히스토그램 메트릭 추가.
 - **로봇 내구도/고장/복구**: 작업(픽/플레이스)마다 로봇 마모가 쌓이고, 마모율에 비례한 확률로 매 틱 고장(`Failed`) 여부를 판정한다 — 매 틱 `rayon`으로 로봇을 병렬 갱신하는 무공유 모델의 순수성을 지키려고 상태 있는 RNG 대신 (로봇 ID, 틱 번호)를 해싱하는 순수 함수로 필요할 때마다 같은 결과를 재계산할 수 있는 결정적 확률 판정을 쓴 것. 고장난 로봇은 이동이 멈추고, 오퍼레이터가 `RepairRobot` 커맨드로 수리를 트리거하면 일정 틱 후 자동 복구된다. `robot_failures_total`/`robots_repairing` 메트릭과 SQLite `robot_failure_events` 이력(`GET /api/robots/failures`)으로 관측 가능. 고장/복구 중인 로봇이 섞여 있어도 기존의 결정성·충돌-회피 proptest가 여전히 성립함을 별도 케이스로 검증.
 - **Plan 4 — 클라이언트 렌더링**: Vite+TS+Canvas2D 웹 클라이언트(`client/`, 프레임워크 없이 vanilla DOM). 그리드 좌표를 아이소메트릭 투영으로 그리고(바닥/장식용 U자 컨베이어/z-order 정렬된 4족 로봇+팔), 서버 틱(20Hz)과 렌더 프레임레이트 차이를 선형 보간+짧은 외삽(최대 100ms)으로 매끄럽게 잇는다. 우측 사이드바로 컨베이어 on/off, 로봇 수 조절, 로봇 선택 후 팔 동작/수리 지시가 가능. 이 작업이 서버 쪽 `RobotView`에 `path`/`facing`/`arm_pose`를 실제로 배선한 계기가 됐고, Plan 1 때부터 있었지만 자기 테스트에서만 불리던 `ik.rs`/`posture.rs`가 처음으로 실제 런타임에서 호출되기 시작했다. 3계층 테스트로 검증: vitest 단위(순수 로직, 뮤테이션 테스트 병행), vitest 통합(실 서버 바이너리 스폰 + 진짜 `ws` 클라이언트), Playwright E2E(실 서버 + 빌드된 클라이언트 + 실제 Chromium, 캔버스 픽셀 샘플링과 DOM 단언). 리뷰 과정에서 실제 버그 여러 건을 잡았다 — 재접속 타이머가 명시적 `close()` 이후에도 취소 안 되던 레이스, `<canvas>`의 자동 min-width 때문에 사이드바가 화면 밖으로 밀려나던 flex 레이아웃 버그(E2E로만 잡을 수 있었음), 픽셀 좌표가 팔 색과 우연히 겹쳐 공허했던 E2E 테스트, Windows에서 `process.kill()` 직후 SQLite 파일 핸들이 안 풀려 생기던 `EBUSY` 정리 실패. 로봇 50대로 실측한 평균 프레임 시간은 약 16.2~16.3ms(≈61~62fps, 실제 서버+`npm run dev` 클라이언트+Chromium으로 30프레임 표본 3회 측정) — 설계문서 성능 목표(60fps 근처, 16.7ms)를 만족.
+- **Plan 5 — 데모/배포**: 서버+클라이언트를 단일 Docker 컨테이너로 패키징(서버가 바인드 주소를 `GAMEROBOTFACTORY_BIND_ADDR`로 환경변수화하고, `tower-http::ServeDir`로 클라이언트 빌드 산출물까지 서빙 — 지금까지는 서버가 `127.0.0.1:0` 임의 포트에만 바인드하고 정적 파일을 서빙할 방법이 아예 없어 컨테이너화 자체가 불가능했다), 클라이언트는 같은 오리진에서 WS 주소를 자동 유도해 `?ws=` 쿼리 파라미터 없이도 배포 환경에서 바로 접속되게 했다. 그 위에 `fly.toml`(Fly.io 배포 설정), CI `docker build` 스모크 잡, Playwright로 데모 영상을 자동 녹화하는 스크립트(`client/scripts/record-demo.mjs`), 배포된 URL을 인자로 받아 실제 성능(로봇 수/틱 수/`tick_duration_seconds` p99)을 실측하는 스크립트(`client/scripts/perf-check.mjs`, 파싱 로직은 `node --test`로 별도 유닛테스트)를 갖췄다. 데모 영상을 녹화하는 과정에서 이 프로젝트의 핵심 증명 포인트(결정적 병렬 경로탐색+충돌회피)가 실제로는 전혀 눈에 안 보인다는 걸 발견했다 — 실제 커맨드 체계 어디에도 로봇에게 이동 목표를 주는 기능이 없어서, 라이브 서버를 띄워도 로봇이 스폰된 자리에서 한 발짝도 안 움직였던 것. `sim_core`에 로봇 id로부터 결정적으로 계산되는 두 지점 사이를 영원히 왕복하는 순찰 목표 배정(`patrol_points`/`next_patrol_goal`)을 추가해 해소했고, 그 여파로 "로봇은 스폰 위치에서 안 움직인다"를 전제하던 Plan 4의 Playwright E2E 스위트가 조용히 깨진 것을 전체 회귀 검증 중 발견해 캔버스 픽셀 스캔 방식(데모 녹화 스크립트가 같은 문제를 푼 방식과 동일)으로 다시 고쳤다.
 
-**현재: 서버 135개 테스트 통과(clippy 경고 0개) + 클라이언트 vitest 단위 46개/통합 3개, Playwright E2E 2개 통과.**
+**현재: 서버 143개 테스트 통과(clippy 경고 0개) + 클라이언트 vitest 단위 49개/통합 3개, Playwright E2E 2개, `node --test` 성능 스크립트 파싱 테스트 4개 통과.**
 
 ## 다음 단계
 
-- **Plan 5**: 데모/배포 (Docker, 라이브 URL, 성능 목표 실측 — 측정 수단은 이제 있음).
+Plan 1~5로 계획됐던 작업은 전부 완료됐다. 남은 건 사용자가 실제로 `flyctl deploy`를 실행해 라이브 URL을 얻고(README "배포" 절 참고), `client/scripts/perf-check.mjs <실제 URL>`로 배포 환경 실측치를 위 "핵심 엔지니어링 결정"/"퀵스타트" 절의 자리 표시에 채워 넣는 것 — 이건 사용자 본인의 Fly.io 계정이 필요해 이 저장소의 작업 범위 밖이다. 그 외 남은 개선 아이디어는 [`docs/KANBAN.md`](docs/KANBAN.md)의 Backlog 절 참고.
 
 상세 계획은 [`docs/superpowers/plans/`](docs/superpowers/plans/)에 있다.
