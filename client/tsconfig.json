@@ -10,7 +10,9 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "noEmit": true
+    "noEmit": true,
+    "isolatedModules": true,
+    "moduleDetection": "force"
   },
   "include": ["src", "tests"]
 }
