@@ -13,6 +13,18 @@ async function main() {
   })
   const page = await context.newPage()
 
+  try {
+    await recordScenario(page)
+    console.log('recorded to demo-recordings/')
+  } finally {
+    // 위에서 무엇이 실패하든(셀렉터 타임아웃 등) 브라우저/컨텍스트는 반드시 정리한다 —
+    // 안 그러면 헤드리스 Chromium 프로세스가 남고 녹화 영상도 불완전하게 남는다.
+    await context.close().catch(() => {})
+    await browser.close().catch(() => {})
+  }
+}
+
+async function recordScenario(page) {
   await page.goto(BASE_URL) // ?ws= 없이 — 같은 오리진 자동 유도 확인
   await page.waitForSelector('.connection-status')
 
@@ -111,16 +123,22 @@ async function main() {
 
   // 재접속 시나리오: 컨테이너를 실제로 내렸다 올려서 WS 연결이 진짜로 끊기게 한다
   // (setOffline은 이미 열린 WS를 안 닫으므로 쓸 수 없음 — 위 설계 결정 참고).
-  await run('docker', ['compose', 'stop', 'app'])
-  await page.waitForSelector('.connection-status:has-text("재연결")', { timeout: 10000 })
-  await page.waitForTimeout(1000)
-  await run('docker', ['compose', 'start', 'app'])
+  // stop과 start는 반드시 짝을 이뤄야 한다 — 중간의 waitForSelector가 타임아웃 등으로
+  // 던지더라도 컨테이너를 내린 채로 스크립트가 끝나 개발 환경이 조용히 망가지면 안 된다.
+  try {
+    await run('docker', ['compose', 'stop', 'app'])
+    await page.waitForSelector('.connection-status:has-text("재연결")', { timeout: 10000 })
+    await page.waitForTimeout(1000)
+  } finally {
+    await run('docker', ['compose', 'start', 'app'])
+  }
+  // 컨테이너가 실제로 다시 떠서 재연결됐는지 확인하는 단계 — "반드시 복구한다"는
+  // 보장과는 별개라 위 finally 밖에 둔다.
   await page.waitForSelector('.connection-status:has-text("연결됨")', { timeout: 15000 })
   await page.waitForTimeout(1000)
-
-  await context.close()
-  await browser.close()
-  console.log('recorded to demo-recordings/')
 }
 
-main()
+main().catch((err) => {
+  console.error(err)
+  process.exitCode = 1
+})
