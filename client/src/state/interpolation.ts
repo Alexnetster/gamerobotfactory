@@ -7,6 +7,8 @@ export const TICK_DURATION_MS = 50
 // 않는다. 튜닝 대상.
 export const MAX_EXTRAPOLATION_MS = 100
 
+/** `pos`는 curr 틱의 확정 위치(서버 권위), `renderPos`는 화면에 그릴
+ * 보간/외삽 위치 — 렌더러/히트테스트는 반드시 `renderPos`를 써야 한다. */
 export interface InterpolatedRobot extends RobotView {
   renderPos: { x: number; y: number }
 }
