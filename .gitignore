@@ -24,6 +24,9 @@ target
 # `cargo run`/`cargo test` without that env var writes here).
 gamerobotfactory.sqlite3
 
+# Playwright 데모 영상 녹화 산출물 (client/scripts/record-demo.mjs)
+demo-recordings/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
