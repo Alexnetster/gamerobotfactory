@@ -61,10 +61,11 @@ cargo clippy --manifest-path server/Cargo.toml --all-targets
 cargo run --manifest-path server/Cargo.toml
 ```
 
-- **포트**: 고정 포트를 쓰지 않는다(`127.0.0.1:0`, OS가 임의 할당) — 실제 바인딩된 포트를 표준출력의 `LISTENING_PORT=<번호>` 줄로 알려준다. 여러 인스턴스를 동시에 띄워도 충돌하지 않는다.
+- **포트**: 고정 포트를 쓰지 않는다(`127.0.0.1:0`, OS가 임의 할당) — 실제 바인딩된 포트를 표준출력의 `LISTENING_PORT=<번호>` 줄로 알려준다. 여러 인스턴스를 동시에 띄워도 충돌하지 않는다. 단, Docker/배포 환경에서는 `GAMEROBOTFACTORY_BIND_ADDR`로 고정 포트를 쓴다(아래 '배포' 절 참고).
 - **환경 변수**:
   - `GAMEROBOTFACTORY_DB_PATH` — SQLite 파일 경로. 기본값은 실행 디렉토리의 `gamerobotfactory.sqlite3`(`.gitignore`에 등록됨).
   - `RUST_LOG` — `tracing` 로그 레벨(예: `RUST_LOG=debug`). 미설정 시 기본값은 `info`.
+  - `GAMEROBOTFACTORY_BIND_ADDR` — 바인드 주소. 기본값은 위와 같이 `127.0.0.1:0`이며, Docker/배포 환경에서는 `0.0.0.0:<고정포트>`로 오버라이드한다(`Dockerfile`에서 `0.0.0.0:8080`으로 설정).
 - **상태**: 서버 프로세스 하나가 인메모리 시뮬레이션 상태 + SQLite 커넥션 하나를 갖는다 — 별도의 외부 DB나 캐시 서버는 필요 없다.
 - **v1 스코프**: 단일 오퍼레이터 세션 전제(한 번에 하나의 클라이언트만 조작 권한을 가짐 — 관전용 다중 접속은 v2 백로그). 자세한 이유는 설계문서 참고.
 

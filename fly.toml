@@ -8,6 +8,7 @@ primary_region = "nrt"    # 실제 배포 시 원하는 리전으로 교체(예:
   force_https = true
   auto_stop_machines = false
   auto_start_machines = true
+  # 상시 실행(autostop 없음) — Fly.io 무료 크레딧을 초과하면 과금될 수 있음
   min_machines_running = 1
 
 [[mounts]]
