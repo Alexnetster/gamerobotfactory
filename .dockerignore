@@ -1,0 +1,8 @@
+server/target
+client/node_modules
+client/dist
+client/test-results
+client/playwright-report
+client/tsconfig.tsbuildinfo
+.git
+.worktrees
