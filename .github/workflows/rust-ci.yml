@@ -76,3 +76,10 @@ jobs:
       # Playwright E2E는 브라우저 설치+빌드+preview 서버까지 더해져 CI
       # 복잡도가 커서 지금은 로컬 실행으로만 검증한다(의도적 스코프 —
       # Plan 5의 Docker 배포 파이프라인과 함께 다시 검토).
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t gamerobotfactory:ci .
