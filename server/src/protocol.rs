@@ -1,7 +1,9 @@
 use crate::game_state::{Conveyor, GameState};
 use serde::{Deserialize, Serialize};
 use sim_core::grid::CellId;
-use sim_core::sim::{BodyPose, Robot, RobotStatus, Task};
+use sim_core::ik::solve_two_bone_ik;
+use sim_core::posture::world_target_to_body_local;
+use sim_core::sim::{BodyPose, Direction, Robot, RobotStatus, Task};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 
@@ -66,6 +68,25 @@ impl From<BodyPose> for WirePose {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WireDirection {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl From<Direction> for WireDirection {
+    fn from(d: Direction) -> WireDirection {
+        match d {
+            Direction::North => WireDirection::North,
+            Direction::East => WireDirection::East,
+            Direction::South => WireDirection::South,
+            Direction::West => WireDirection::West,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum WireStatus {
@@ -105,6 +126,44 @@ pub struct RobotView {
     pub task: WireTask,
     pub status: WireStatus,
     pub durability_remaining: f32,
+    pub path: Vec<WireCellId>,
+    pub facing: WireDirection,
+    pub arm_pose: WireArmPose,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WireArmPose {
+    pub shoulder_angle: f32,
+    pub elbow_angle: f32,
+}
+
+// 아래 네 상수는 클라이언트(`client/src/render/projection.ts`, 나중 태스크에서
+// 작성됨)에도 그대로 미러링해서 유지해야 한다 — 와이어로 안 보내는 이유는
+// 안 바뀌는 튜닝 상수를 매 메시지에 싣는 게 낭비이기 때문(설계문서 참고).
+const WORK_TARGET_HEIGHT: f32 = 0.75;
+const WORK_TARGET_FORWARD: f32 = 0.6;
+const UPPER_ARM_LEN: f32 = 0.7;
+const LOWER_ARM_LEN: f32 = 0.6;
+const IDLE_ARM_POSE: WireArmPose = WireArmPose { shoulder_angle: 0.0, elbow_angle: 0.0 };
+
+/// `task`만 보고 자세(Standing/Crouching)를 결정한다 — 컨베이어 칸별
+/// 높이 같은 위치 기반 데이터는 시뮬레이션에 없고(설계문서 "서버 쪽 변경"
+/// 절 참고), 그런 걸 새로 만들 필요도 없다고 확인됐다.
+fn pose_for(task: Task) -> BodyPose {
+    if task == Task::Idle {
+        BodyPose::Standing
+    } else {
+        BodyPose::Crouching
+    }
+}
+
+fn arm_pose_for(robot: &Robot) -> WireArmPose {
+    if robot.task == Task::Idle {
+        return IDLE_ARM_POSE;
+    }
+    let local_target = world_target_to_body_local(WORK_TARGET_HEIGHT, WORK_TARGET_FORWARD, pose_for(robot.task));
+    let solved = solve_two_bone_ik(UPPER_ARM_LEN, LOWER_ARM_LEN, local_target);
+    WireArmPose { shoulder_angle: solved.shoulder_angle, elbow_angle: solved.elbow_angle }
 }
 
 impl From<&Robot> for RobotView {
@@ -112,11 +171,14 @@ impl From<&Robot> for RobotView {
         RobotView {
             id: r.id,
             pos: r.pos.into(),
-            pose: r.pose.into(),
+            pose: pose_for(r.task).into(),
             leg_cycle_progress: r.leg_cycle_progress,
             task: r.task.into(),
             status: r.status.into(),
             durability_remaining: quantize_durability(r.wear_ratio()),
+            path: r.path.iter().map(|&c| c.into()).collect(),
+            facing: r.facing.into(),
+            arm_pose: arm_pose_for(r),
         }
     }
 }
@@ -230,6 +292,73 @@ mod tests {
         let view = RobotView::from(&robot);
 
         assert_eq!(view.status, WireStatus::Repairing { remaining_ticks: 42 });
+    }
+
+    #[test]
+    fn robot_view_reports_path_as_wire_cells() {
+        use sim_core::sim::Robot;
+        let mut robot = Robot::new(1, (0, 0), (5, 0));
+        robot.path = vec![(1, 0), (2, 0)];
+
+        let view = RobotView::from(&robot);
+
+        assert_eq!(view.path, vec![WireCellId { x: 1, y: 0 }, WireCellId { x: 2, y: 0 }]);
+    }
+
+    #[test]
+    fn robot_view_reports_facing() {
+        use sim_core::sim::{Direction, Robot};
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        robot.facing = Direction::North;
+
+        let view = RobotView::from(&robot);
+
+        assert_eq!(view.facing, WireDirection::North);
+    }
+
+    #[test]
+    fn robot_view_pose_is_standing_when_idle_and_crouching_while_working() {
+        use sim_core::sim::{Robot, Task};
+        let idle = Robot::new(1, (0, 0), (0, 0));
+        assert_eq!(RobotView::from(&idle).pose, WirePose::Standing);
+
+        let mut working = Robot::new(2, (0, 0), (0, 0));
+        working.task = Task::Picking;
+        assert_eq!(RobotView::from(&working).pose, WirePose::Crouching);
+    }
+
+    #[test]
+    fn robot_view_arm_pose_is_idle_rest_when_task_is_idle() {
+        use sim_core::sim::Robot;
+        let robot = Robot::new(1, (0, 0), (0, 0));
+        assert_eq!(RobotView::from(&robot).arm_pose, IDLE_ARM_POSE);
+    }
+
+    #[test]
+    fn robot_view_arm_pose_is_solved_via_ik_while_working() {
+        use sim_core::sim::{Robot, Task};
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        robot.task = Task::Picking;
+
+        let view = RobotView::from(&robot);
+
+        assert_ne!(view.arm_pose, IDLE_ARM_POSE, "작업 중이면 대기 자세가 아니라 실제 IK 해가 나와야 한다");
+        assert!(view.arm_pose.shoulder_angle.is_finite());
+        assert!(view.arm_pose.elbow_angle.is_finite());
+    }
+
+    #[test]
+    fn robot_view_arm_pose_is_stable_when_task_and_facing_are_unchanged() {
+        // task/facing이 같으면 다른 로봇(다른 id/위치)이어도 arm_pose가
+        // 완전히 같아야 한다 — compute_delta의 PartialEq 비교가 이 필드를
+        // 델타에서 제대로 걸러내는지(대역폭 회귀 방지)의 전제조건.
+        use sim_core::sim::{Robot, Task};
+        let mut a = Robot::new(1, (0, 0), (0, 0));
+        a.task = Task::Picking;
+        let mut b = Robot::new(2, (5, 5), (5, 5));
+        b.task = Task::Picking;
+
+        assert_eq!(RobotView::from(&a).arm_pose, RobotView::from(&b).arm_pose);
     }
 
     #[test]

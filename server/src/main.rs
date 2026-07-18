@@ -357,6 +357,9 @@ mod tests {
             task: protocol::WireTask::Idle,
             status,
             durability_remaining: 1.0,
+            path: Vec::new(),
+            facing: protocol::WireDirection::East,
+            arm_pose: protocol::WireArmPose { shoulder_angle: 0.0, elbow_angle: 0.0 },
         }
     }
 

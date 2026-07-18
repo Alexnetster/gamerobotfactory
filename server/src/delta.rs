@@ -33,7 +33,7 @@ pub fn compute_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{WireCellId, WireStatus, WireTask};
+    use crate::protocol::{WireArmPose, WireCellId, WireDirection, WireStatus, WireTask};
     use sim_core::sim::BodyPose;
 
     fn robot_view(id: u32, x: i32) -> RobotView {
@@ -45,6 +45,9 @@ mod tests {
             task: WireTask::Idle,
             status: WireStatus::Operational,
             durability_remaining: 1.0,
+            path: Vec::new(),
+            facing: WireDirection::East,
+            arm_pose: WireArmPose { shoulder_angle: 0.0, elbow_angle: 0.0 },
         }
     }
 
