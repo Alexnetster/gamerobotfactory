@@ -37,6 +37,7 @@ export class Connection {
   private socket: WebSocketLike | null = null
   private reconnectAttempt = 0
   private closedByUser = false
+  private generation = 0
 
   constructor(
     private readonly url: string,
@@ -48,6 +49,8 @@ export class Connection {
 
   connect(): void {
     this.closedByUser = false
+    this.generation += 1
+    const myGeneration = this.generation
     this.callbacks.onStatusChange(
       this.reconnectAttempt === 0 ? { kind: 'connecting' } : { kind: 'reconnecting', attempt: this.reconnectAttempt },
     )
@@ -81,7 +84,11 @@ export class Connection {
       this.reconnectAttempt += 1
       const delay = Math.min(BASE_RECONNECT_DELAY_MS * 2 ** (this.reconnectAttempt - 1), MAX_RECONNECT_DELAY_MS)
       this.callbacks.onStatusChange({ kind: 'reconnecting', attempt: this.reconnectAttempt })
-      this.scheduleReconnect(delay, () => this.connect())
+      this.scheduleReconnect(delay, () => {
+        if (this.generation === myGeneration) {
+          this.connect()
+        }
+      })
     }
 
     socket.onerror = () => {
@@ -95,6 +102,8 @@ export class Connection {
 
   close(): void {
     this.closedByUser = true
+    this.generation += 1
+    this.reconnectAttempt = 0
     this.socket?.close()
   }
 }

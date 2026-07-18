@@ -146,4 +146,31 @@ describe('Connection', () => {
     expect(scheduled).toHaveLength(0)
     expect(sockets[0].closed).toBe(true)
   })
+
+  it('does not reconnect when close() lands during the backoff wait, even if the pending reconnect fires later', () => {
+    const sockets: FakeWebSocket[] = []
+    const scheduled: Array<() => void> = []
+    const conn = new Connection(
+      'ws://x',
+      () => {
+        const s = new FakeWebSocket()
+        sockets.push(s)
+        return s
+      },
+      memoryStorage(),
+      { onMessage: () => {}, onStatusChange: () => {} },
+      (_delayMs, fn) => scheduled.push(fn),
+    )
+
+    conn.connect()
+    sockets[0].onclose?.(undefined) // 예기치 못한 종료 -> 재연결 타이머 예약 (소켓은 아직 null)
+
+    expect(scheduled).toHaveLength(1)
+
+    conn.close() // 대기 중에 사용자가 명시적으로 종료
+
+    scheduled[0]() // 예약됐던 재연결 타이머가 뒤늦게 실행됨
+
+    expect(sockets).toHaveLength(1) // 새 소켓이 만들어지면 안 된다
+  })
 })
