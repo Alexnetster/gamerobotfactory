@@ -1,0 +1,5 @@
+node_modules/
+dist/
+playwright-report/
+test-results/
+tests/e2e/.server-info.json
