@@ -286,6 +286,17 @@ pub fn build_app(
         .layer(axum::extract::Extension(metrics))
 }
 
+/// 바인드 주소를 env var 값에서 직접 읽지 않고 파라미터로 받는 순수
+/// 함수로 분리한다 — `main()` 안에서 `std::env::var`를 직접 부르면
+/// 유닛테스트가 프로세스 전역 상태(env var)를 건드리게 되고, Rust
+/// 테스트는 기본적으로 병렬 실행되므로 다른 테스트와 레이스가 생길 수
+/// 있다. 기본값은 기존 동작과 동일한 `127.0.0.1:0`(로컬 개발/테스트에서
+/// 여러 서버 인스턴스를 동시에 띄워도 포트 충돌이 없도록) — Docker/배포
+/// 환경에서만 `GAMEROBOTFACTORY_BIND_ADDR`로 오버라이드한다.
+fn resolve_bind_addr(env_value: Option<&str>) -> String {
+    env_value.unwrap_or("127.0.0.1:0").to_string()
+}
+
 /// 포트를 고정하지 않고 OS가 빈 포트를 골라주게 한다(`:0`) — 통합테스트
 /// (Task 10)에서 여러 서버 인스턴스를 동시에 띄워도 포트 충돌이 나지
 /// 않도록 하기 위함. 실제 바인딩된 포트는 표준출력에 기계가 파싱하기
@@ -317,9 +328,10 @@ async fn main() {
 
     let app = build_app(state, broadcaster, sessions, db, config, metrics);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let bind_addr = resolve_bind_addr(std::env::var("GAMEROBOTFACTORY_BIND_ADDR").ok().as_deref());
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
-        .expect("failed to bind 127.0.0.1:0");
+        .unwrap_or_else(|e| panic!("failed to bind {bind_addr}: {e}"));
     println!("LISTENING_PORT={}", listener.local_addr().unwrap().port());
     axum::serve(listener, app).await.expect("server exited with an error");
 }
@@ -438,5 +450,15 @@ mod tests {
         let events = detect_status_transitions(&previous, &current, 1);
 
         assert!(events.is_empty(), "a robot still Repairing (not yet Operational) must not fire a repaired event");
+    }
+
+    #[test]
+    fn resolve_bind_addr_defaults_to_loopback_random_port_when_unset() {
+        assert_eq!(resolve_bind_addr(None), "127.0.0.1:0");
+    }
+
+    #[test]
+    fn resolve_bind_addr_uses_env_value_when_set() {
+        assert_eq!(resolve_bind_addr(Some("0.0.0.0:8080")), "0.0.0.0:8080");
     }
 }
