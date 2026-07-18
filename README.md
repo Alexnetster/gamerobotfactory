@@ -68,6 +68,29 @@ cargo run --manifest-path server/Cargo.toml
 - **상태**: 서버 프로세스 하나가 인메모리 시뮬레이션 상태 + SQLite 커넥션 하나를 갖는다 — 별도의 외부 DB나 캐시 서버는 필요 없다.
 - **v1 스코프**: 단일 오퍼레이터 세션 전제(한 번에 하나의 클라이언트만 조작 권한을 가짐 — 관전용 다중 접속은 v2 백로그). 자세한 이유는 설계문서 참고.
 
+## 배포
+
+[Fly.io](https://fly.io)에 단일 컨테이너로 배포하도록 `fly.toml`을 준비해뒀다. 실제 배포는 본인 Fly.io 계정으로 진행한다:
+
+```bash
+# 최초 1회
+flyctl launch --no-deploy   # fly.toml이 이미 있으므로 기존 설정 그대로 사용할지 물어보면 예
+flyctl volumes create gamerobotfactory_data --size 1
+
+# 배포
+flyctl deploy
+```
+
+배포가 끝나면 `flyctl status`로 나온 URL을 열면 바로 체험 가능하다(별도 쿼리 파라미터 불필요 — 클라이언트가 같은 오리진에서 자동으로 WS에 접속한다).
+
+### 로컬에서 배포 이미지와 동일하게 실행
+
+```bash
+docker compose up
+```
+
+`http://localhost:8080`에서 배포 환경과 동일한 빌드로 바로 체험 가능하다.
+
 ## 프로토콜
 
 WebSocket(`/ws`)과 REST가 역할을 분리한다 — WS는 실시간 게임 상태(20Hz), REST는 설정/통계처럼 느리게 바뀌는 데이터.

@@ -1,0 +1,19 @@
+app = "gamerobotfactory"  # 실제 배포 시 본인 Fly.io 앱 이름으로 교체
+primary_region = "nrt"    # 실제 배포 시 원하는 리전으로 교체(예: nrt=도쿄)
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "gamerobotfactory_data"
+  destination = "/data"
+
+[env]
+  GAMEROBOTFACTORY_DB_PATH = "/data/gamerobotfactory.sqlite3"
+  RUST_LOG = "info"
