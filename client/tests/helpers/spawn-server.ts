@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -10,6 +11,11 @@ export interface SpawnedServer {
   port: number
   dbDir: string
 }
+
+// vitest(vite-node)와 Playwright(순수 ESM 로더) 양쪽에서 다 쓰이는데,
+// Playwright 쪽은 CJS `__dirname` 셈을 넣어주지 않으므로 `import.meta.url`
+// 기반으로 직접 계산한다.
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 function resolveServerBinaryPath(): string {
   const exeName = process.platform === 'win32' ? 'server.exe' : 'server'
