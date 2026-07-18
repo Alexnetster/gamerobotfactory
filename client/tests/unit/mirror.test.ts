@@ -46,6 +46,17 @@ describe('applyServerMessage', () => {
     expect(mirror.robots.get(1)?.pos).toEqual({ x: 3, y: 0 })
   })
 
+  it('adds a brand-new robot introduced via Delta', () => {
+    let mirror = applyServerMessage(createEmptyMirror(), {
+      kind: 'Snapshot', v: 1, tick: 1, session_id: 'abc', conveyor: { running: true }, robots: [robot(1, 0)],
+    })
+    mirror = applyServerMessage(mirror, {
+      kind: 'Delta', v: 1, tick: 2, conveyor: null, changed_robots: [robot(2, 5)], removed_robot_ids: [],
+    })
+    expect(mirror.robots.size).toBe(2)
+    expect(mirror.robots.get(2)?.pos).toEqual({ x: 5, y: 0 })
+  })
+
   it('removes robots listed in removed_robot_ids', () => {
     let mirror = applyServerMessage(createEmptyMirror(), {
       kind: 'Snapshot', v: 1, tick: 1, session_id: 'abc', conveyor: { running: true }, robots: [robot(1, 0), robot(2, 1)],
