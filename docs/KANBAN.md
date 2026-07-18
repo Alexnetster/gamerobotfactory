@@ -94,7 +94,7 @@
 
 ### 기타 (문서 위생, 급하지 않음)
 - Plan 1/2/3 계획 문서 3개 전부(스텝 총 100+개) 태스크 체크박스(`- [ ]`)가 실제 완료 상태를 반영하지 못하고 있음 — 기능 영향 없는 문서 위생 이슈. (상태 점검 중 Plan 3도 해당됨을 추가 확인)
-- 설계문서가 v1 스코프에 "CI"를 명시하고 있으나(`docs/robot-arm-conveyor-game-design.md` 백엔드 요약 표) `.github/workflows` 자체가 없음 — 지금은 로컬 `cargo test`/`clippy`로만 검증됨.
+- ~~설계문서가 v1 스코프에 "CI"를 명시하고 있으나 `.github/workflows` 자체가 없음~~ — **해소됨.** `.github/workflows/rust-ci.yml`에 `server`(cargo test/clippy)와 `client`(서버 바이너리 빌드 + npm typecheck/단위/통합테스트) 두 잡을 둠. Playwright E2E는 브라우저 설치+빌드+preview 서버까지 더해져 CI 복잡도가 커서 의도적으로 로컬 실행으로만 검증(Plan 5의 Docker 배포 파이프라인과 함께 재검토 예정) — 이것만 남은 갭.
 
 ## 현재 건강도 스냅샷
 

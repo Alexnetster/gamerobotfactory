@@ -1,4 +1,4 @@
-name: Rust CI
+name: CI
 
 on:
   push:
@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  server:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,3 +32,47 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --manifest-path server/Cargo.toml --all-targets -- -D warnings
+
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # 클라이언트 통합테스트(tests/integration/)가 실제 서버 바이너리를
+      # 스폰하므로, 테스트 실행 전에 서버가 빌드돼 있어야 한다(빌드만
+      # 하면 되고 서버 쪽 테스트/clippy는 server 잡이 이미 담당).
+      - name: Build server binary (for client integration tests)
+        run: cargo build --manifest-path server/Cargo.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: client
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: client
+        run: npm test
+
+      - name: Integration tests (real server binary + real ws client)
+        working-directory: client
+        run: npm run test:integration
+
+      # Playwright E2E는 브라우저 설치+빌드+preview 서버까지 더해져 CI
+      # 복잡도가 커서 지금은 로컬 실행으로만 검증한다(의도적 스코프 —
+      # Plan 5의 Docker 배포 파이프라인과 함께 다시 검토).
