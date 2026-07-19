@@ -1,6 +1,14 @@
 export const TILE_WIDTH = 64
 export const TILE_HEIGHT = 32
 
+// 전체 씬(타일+로봇)을 한 번에 키우는 배율. 로봇 몸체/다리는 절대 픽셀
+// 상수(canvas.ts::drawRobot)라 TILE_WIDTH/HEIGHT만 키우면 타일 사이 간격만
+// 넓어지고 로봇 자체는 그대로 작게 남는다 — drawScene에서 ctx.scale로 씬
+// 전체에 곱해야 타일과 로봇이 함께 커진다. 클릭 히트테스트(main.ts)와 E2E
+// 테스트(render.spec.ts)의 클릭 좌표 계산도 이 값을 역보정으로 써야
+// 화면에 보이는 위치와 클릭 판정이 어긋나지 않는다.
+export const RENDER_SCALE = 1.8
+
 // server/src/protocol.rs의 UPPER_ARM_LEN/LOWER_ARM_LEN과 반드시 같은
 // 값으로 유지해야 한다 — 와이어로 안 보내는 튜닝 상수.
 export const UPPER_ARM_LEN = 0.7

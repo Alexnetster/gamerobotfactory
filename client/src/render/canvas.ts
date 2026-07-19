@@ -1,4 +1,4 @@
-import { gridToScreen, zOrderKey, wristWorldOffset, TILE_WIDTH, TILE_HEIGHT } from './projection'
+import { gridToScreen, zOrderKey, wristWorldOffset, TILE_WIDTH, TILE_HEIGHT, RENDER_SCALE } from './projection'
 import type { InterpolatedRobot } from '../state/interpolation'
 import type { ConveyorView } from '../net/protocol'
 
@@ -41,6 +41,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, canvasWidth: number, ca
   ctx.clearRect(0, 0, canvasWidth, canvasHeight)
   ctx.save()
   ctx.translate(canvasWidth / 2, 40)
+  ctx.scale(RENDER_SCALE, RENDER_SCALE)
 
   drawFloor(ctx, input.grid, input.conveyor, input.animationTimeMs)
 

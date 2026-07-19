@@ -5,7 +5,7 @@ import type { MirrorState } from './state/mirror'
 import { computeRenderRobots } from './state/interpolation'
 import type { TickSnapshot } from './state/interpolation'
 import { drawScene } from './render/canvas'
-import { gridToScreen } from './render/projection'
+import { gridToScreen, RENDER_SCALE } from './render/projection'
 import { Sidebar } from './ui/sidebar'
 import type { ServerMessage } from './net/protocol'
 import type { WebSocketLike } from './net/connection'
@@ -127,8 +127,11 @@ function main(): void {
   canvas.addEventListener('click', (ev) => {
     if (!currSnapshot) return
     const rect = canvas.getBoundingClientRect()
-    const clickX = ev.clientX - rect.left - canvas.width / 2
-    const clickY = ev.clientY - rect.top - 40
+    // drawScene이 translate 다음에 ctx.scale(RENDER_SCALE)을 적용하므로,
+    // gridToScreen이 돌려주는 미확대(unscaled) 좌표와 비교하려면 클릭
+    // 좌표도 같은 배율로 나눠 역보정해야 한다.
+    const clickX = (ev.clientX - rect.left - canvas.width / 2) / RENDER_SCALE
+    const clickY = (ev.clientY - rect.top - 40) / RENDER_SCALE
     const rendered = computeRenderRobots(prevSnapshot, currSnapshot, performance.now())
 
     // 가장 가까운 로봇을 선택한다 — 로봇 수가 적은 v1 스코프에서는 정밀한

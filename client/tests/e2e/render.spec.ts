@@ -8,7 +8,7 @@ import { applyServerMessage, createEmptyMirror } from '../../src/state/mirror'
 import type { MirrorState } from '../../src/state/mirror'
 import { computeRenderRobots } from '../../src/state/interpolation'
 import type { TickSnapshot } from '../../src/state/interpolation'
-import { gridToScreen } from '../../src/render/projection'
+import { gridToScreen, RENDER_SCALE } from '../../src/render/projection'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -281,11 +281,12 @@ test.describe('client renders against a real server', () => {
           continue
         }
         const screen = gridToScreen(target.renderPos.x, target.renderPos.y)
-        // canvas.ts::drawScene의 `ctx.translate(canvasWidth / 2, 40)`과
-        // 대칭되는 역연산 — main.ts의 click 핸들러가 clientX/Y에서 캔버스
-        // 내부 좌표를 복원할 때 쓰는 바로 그 오프셋이다.
-        const pageX = canvasBox.x + canvasWidth / 2 + screen.x
-        const pageY = canvasBox.y + 40 + screen.y
+        // canvas.ts::drawScene의 `ctx.translate(canvasWidth / 2, 40)` 다음
+        // `ctx.scale(RENDER_SCALE)`과 대칭되는 역연산 — gridToScreen은
+        // 미확대(unscaled) 좌표를 돌려주므로, 실제 화면에 렌더링된 위치를
+        // 클릭하려면 RENDER_SCALE을 곱해줘야 한다.
+        const pageX = canvasBox.x + canvasWidth / 2 + screen.x * RENDER_SCALE
+        const pageY = canvasBox.y + 40 + screen.y * RENDER_SCALE
         await page.mouse.click(pageX, pageY)
         try {
           await expect(page.locator('.selected-robot-panel')).toContainText('로봇 #', { timeout: 1000 })
