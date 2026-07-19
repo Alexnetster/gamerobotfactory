@@ -1,20 +1,28 @@
-app = "gamerobotfactory"  # 실제 배포 시 본인 Fly.io 앱 이름으로 교체
-primary_region = "nrt"    # 실제 배포 시 원하는 리전으로 교체(예: nrt=도쿄)
+# fly.toml app configuration file generated for gamerobotfactory on 2026-07-19T12:49:51+09:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'gamerobotfactory'
+primary_region = 'nrt'
 
 [build]
+[env]
+  GAMEROBOTFACTORY_DB_PATH = '/data/gamerobotfactory.sqlite3'
+  RUST_LOG = 'info'
+
+[[mounts]]
+  source = 'data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
-  # 상시 실행(autostop 없음) — Fly.io 무료 크레딧을 초과하면 과금될 수 있음
   min_machines_running = 1
 
-[[mounts]]
-  source = "gamerobotfactory_data"
-  destination = "/data"
-
-[env]
-  GAMEROBOTFACTORY_DB_PATH = "/data/gamerobotfactory.sqlite3"
-  RUST_LOG = "info"
+[[vm]]
+  memory = '1gb'
+  cpus = 1
+  memory_mb = 1024
