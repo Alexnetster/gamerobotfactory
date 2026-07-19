@@ -278,7 +278,12 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count
         next.ticks_until_repath -= 1;
     }
 
-    if tick_count.is_multiple_of(PATROL_MOVE_INTERVAL_TICKS) {
+    // `u64::is_multiple_of`(clippy가 권하는 표현)는 Dockerfile이 고정한
+    // `rust:1.85-bookworm`에서 아직 unstable(rust-lang/rust#128101)이라
+    // Docker 빌드가 깨진다 — 로컬 최신 stable에서만 통과하는 걸 실제
+    // Docker 빌드로 재현해서 확인했다. 이식성을 위해 `%`로 되돌린다.
+    #[allow(clippy::manual_is_multiple_of)]
+    if tick_count % PATROL_MOVE_INTERVAL_TICKS == 0 {
         if let Some(&next_cell) = next.path.first() {
             // `find_path`는 `start`를 제외한 경로를 반환하므로 `next_cell`이
             // `robot.pos`(현재 칸)와 같아지는 경우는 없다 — 그래서 여기서는
