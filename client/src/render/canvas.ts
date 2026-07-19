@@ -1,4 +1,4 @@
-import { gridToScreen, zOrderKey, wristWorldOffset, TILE_WIDTH, TILE_HEIGHT, RENDER_SCALE } from './projection'
+import { gridToScreen, zOrderKey, wristWorldOffset, elbowWorldOffset, TILE_WIDTH, TILE_HEIGHT, RENDER_SCALE } from './projection'
 import type { InterpolatedRobot } from '../state/interpolation'
 import type { ConveyorView } from '../net/protocol'
 
@@ -108,24 +108,36 @@ function drawTile(ctx: CanvasRenderingContext2D, sx: number, sy: number, isBelt:
 
 function drawRobot(ctx: CanvasRenderingContext2D, robot: InterpolatedRobot, selected: boolean): void {
   const screen = gridToScreen(robot.renderPos.x, robot.renderPos.y)
-  const wrist = wristWorldOffset({
+  const armPoseInput = {
     pos: robot.renderPos, facing: robot.facing, shoulderAngle: robot.arm_pose.shoulder_angle, elbowAngle: robot.arm_pose.elbow_angle,
-  })
+  }
+  const elbow = elbowWorldOffset(armPoseInput)
+  const elbowScreen = gridToScreen(elbow.x, elbow.y)
+  const wrist = wristWorldOffset(armPoseInput)
   const wristScreen = gridToScreen(wrist.x, wrist.y)
   const bodyLift = robot.pose === 'Crouching' ? 6 : 12 // 자세에 따른 몸체 높이(화면 픽셀, 튜닝 대상)
 
   ctx.save()
   ctx.translate(screen.x, screen.y)
 
+  // 다리 — 몸체 바깥으로 뚜렷하게 뻗어 나오는 4족 자세가 보이도록 몸체
+  // 폭(22px)보다 더 벌리고(±14), 발끝에 작은 원을 찍어 다리 끝이 어디서
+  // 끝나는지 명확히 한다. 이렇게 안 하면 짧은 세로선만 보여서 몸체 밑에
+  // 거의 안 보이고, 로봇 전체가 가오리처럼 미끄러지는 것처럼 보인다.
   ctx.strokeStyle = '#6b4810'
+  ctx.fillStyle = '#6b4810'
   ctx.lineWidth = 3
   for (let i = 0; i < 4; i++) {
     const phase = (robot.leg_cycle_progress + i * 0.25) % 1
-    const legX = (i < 2 ? -8 : 8) + (phase < 0.5 ? -3 : 3)
+    const legX = (i < 2 ? -14 : 14) + (phase < 0.5 ? -4 : 4)
+    const footY = -bodyLift + 14
     ctx.beginPath()
     ctx.moveTo(legX, -bodyLift)
-    ctx.lineTo(legX, -bodyLift + 8)
+    ctx.lineTo(legX, footY)
     ctx.stroke()
+    ctx.beginPath()
+    ctx.arc(legX, footY, 2, 0, Math.PI * 2)
+    ctx.fill()
   }
 
   const bodyGradient = ctx.createLinearGradient(-11, -bodyLift - 8, 11, -bodyLift + 8)
@@ -139,10 +151,14 @@ function drawRobot(ctx: CanvasRenderingContext2D, robot: InterpolatedRobot, sele
     ctx.strokeRect(-11, -bodyLift - 8, 22, 16)
   }
 
+  // 팔 — 어깨-팔꿈치-손목 두 세그먼트로 그려야 elbow_angle에 따른 실제
+  // 굽힘이 보인다. 어깨에서 손목까지 직선 하나로만 이으면(예전 방식)
+  // 팔이 항상 뻣뻣한 막대처럼 보여서 팔꿈치 각도가 있어도 티가 안 났다.
   ctx.strokeStyle = '#a06f1a'
   ctx.lineWidth = 3
   ctx.beginPath()
   ctx.moveTo(0, -bodyLift)
+  ctx.lineTo(elbowScreen.x - screen.x, elbowScreen.y - screen.y - bodyLift)
   ctx.lineTo(wristScreen.x - screen.x, wristScreen.y - screen.y - bodyLift)
   ctx.stroke()
 

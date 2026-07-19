@@ -4,6 +4,7 @@ import {
   forwardKinematics,
   forwardDirectionVector,
   wristWorldOffset,
+  elbowWorldOffset,
   zOrderKey,
   UPPER_ARM_LEN,
   LOWER_ARM_LEN,
@@ -49,6 +50,19 @@ describe('wristWorldOffset', () => {
     const wrist = wristWorldOffset({ pos: { x: 2, y: 3 }, facing: 'East', shoulderAngle: 0, elbowAngle: 0 })
     expect(wrist.x).toBeCloseTo(2 + UPPER_ARM_LEN + LOWER_ARM_LEN)
     expect(wrist.y).toBeCloseTo(3)
+  })
+})
+
+describe('elbowWorldOffset', () => {
+  it('extends only the upper-arm segment forward, stopping short of the wrist', () => {
+    const elbow = elbowWorldOffset({ pos: { x: 2, y: 3 }, facing: 'East', shoulderAngle: 0, elbowAngle: 0 })
+    expect(elbow.x).toBeCloseTo(2 + UPPER_ARM_LEN)
+    expect(elbow.y).toBeCloseTo(3)
+  })
+
+  it('matches manual trigonometry for a 90-degree shoulder angle', () => {
+    const elbow = elbowWorldOffset({ pos: { x: 2, y: 3 }, facing: 'East', shoulderAngle: Math.PI / 2, elbowAngle: 0 })
+    expect(elbow.x).toBeCloseTo(2, 5)
   })
 })
 

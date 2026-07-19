@@ -78,6 +78,18 @@ export function wristWorldOffset(input: RobotPoseInput): { x: number; y: number;
   }
 }
 
+/** 팔꿈치(어깨-팔뚝 관절)의 월드 그리드 좌표 — upper arm 세그먼트만 반영한다
+ * (elbowAngle 무관). drawRobot이 손목까지 직선 하나로 잇지 않고 이 지점을
+ * 거쳐 두 세그먼트로 그려야 실제 굽힘(elbow_angle)이 화면에 보인다. */
+export function elbowWorldOffset(input: RobotPoseInput): { x: number; y: number } {
+  const dir = forwardDirectionVector(input.facing)
+  const localX = UPPER_ARM_LEN * Math.cos(input.shoulderAngle)
+  return {
+    x: input.pos.x + dir.dx * localX,
+    y: input.pos.y + dir.dy * localX,
+  }
+}
+
 /** z-order 정렬 키 — 몸체 칸이 아니라 (몸체+팔이 차지하는) 바운딩 박스의
  * 가장 먼 안쪽 모서리 기준 x+y. 팔이 몸체 뒤쪽으로 접히는 경우(로컬 x가
  * 음수)엔 몸체 칸 자체가 최댓값이 된다. */
