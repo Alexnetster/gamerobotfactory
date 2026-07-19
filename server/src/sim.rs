@@ -5,6 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const REPATH_INTERVAL: u32 = 10;
+// 로봇이 매 틱(20Hz, 50ms)마다 한 칸씩 움직이면 초당 20칸이라 화면에서
+// 너무 빠르게 스치듯 보인다(배포 후 실측 피드백) — 순찰 이동만 이
+// 배수만큼 늦춰서 여러 틱에 한 번씩 걷게 한다. 다리 애니메이션도 실제로
+// 이동이 일어난 틱에만 전진하므로(tick()의 post-processing 참고) 자연스럽게
+// "한 걸음 걷고 잠깐 멈춤"의 리듬이 된다. 튜닝 대상.
+const PATROL_MOVE_INTERVAL_TICKS: u64 = 3;
 const LEG_CYCLE_SPEED: f32 = 0.1;
 const WEAR_LIMIT_TICKS: u64 = 2000; // 100초 분량의 작업(20Hz 기준) — 튜닝 대상
 const MAX_FAILURE_PROB: f64 = 0.05; // 완전 마모 상태에서의 틱당 최대 고장 확률 — 튜닝 대상
@@ -272,17 +278,21 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count
         next.ticks_until_repath -= 1;
     }
 
-    if let Some(&next_cell) = next.path.first() {
-        // `find_path`는 `start`를 제외한 경로를 반환하므로 `next_cell`이
-        // `robot.pos`(현재 칸)와 같아지는 경우는 없다 — 그래서 여기서는
-        // `occupied` 검사만으로 충분하다.
-        if !occupied.contains(&next_cell) {
-            next.pos = next_cell;
-            next.path.remove(0);
+    if tick_count.is_multiple_of(PATROL_MOVE_INTERVAL_TICKS) {
+        if let Some(&next_cell) = next.path.first() {
+            // `find_path`는 `start`를 제외한 경로를 반환하므로 `next_cell`이
+            // `robot.pos`(현재 칸)와 같아지는 경우는 없다 — 그래서 여기서는
+            // `occupied` 검사만으로 충분하다.
+            if !occupied.contains(&next_cell) {
+                next.pos = next_cell;
+                next.path.remove(0);
+            }
+            // else: 다른 로봇이 지난 틱 기준으로 그 칸을 차지하고 있다 —
+            // 이번 틱은 멈추고, 곧 돌아올 재계획 주기에서 우회로를 찾는다.
         }
-        // else: 다른 로봇이 지난 틱 기준으로 그 칸을 차지하고 있다 —
-        // 이번 틱은 멈추고, 곧 돌아올 재계획 주기에서 우회로를 찾는다.
     }
+    // else: 이동 지연 주기가 아닌 틱 — 경로/재계획 타이머는 정상 진행하되
+    // 실제 한 칸 이동만 이번 틱은 건너뛴다.
 
     next
 }
@@ -350,12 +360,36 @@ mod tests {
     }
 
     #[test]
+    fn robot_does_not_move_on_a_tick_that_is_not_a_patrol_interval_multiple() {
+        let mut state = simple_state(5, 1);
+        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
+        state.tick_count = 1; // 1 % PATROL_MOVE_INTERVAL_TICKS(3) != 0
+
+        let next = tick(&state);
+
+        assert_eq!(next.robots[0].pos, (0, 0), "이동 지연 주기가 아닌 틱에는 움직이지 않아야 한다");
+    }
+
+    #[test]
+    fn robot_moves_once_the_patrol_interval_tick_arrives() {
+        let mut state = simple_state(5, 1);
+        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
+        state.tick_count = PATROL_MOVE_INTERVAL_TICKS; // 3 % 3 == 0
+
+        let next = tick(&state);
+
+        assert_eq!(next.robots[0].pos, (1, 0), "이동 지연 주기가 돌아온 틱에는 정상적으로 한 칸 이동해야 한다");
+    }
+
+    #[test]
     fn robot_moves_one_step_toward_goal_each_tick() {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (0, 0), (3, 0)));
 
         let next = tick(&state);
 
+        // tick_count=0은 항상 이동 지연 주기의 배수(0 % N == 0)라 첫 이동은
+        // 지연과 무관하게 즉시 일어난다.
         assert_eq!(next.robots[0].pos, (1, 0));
         assert_eq!(next.tick_count, 1);
     }
@@ -636,7 +670,13 @@ mod tests {
         state.robots[0].goal = (0, 0); // 이제 서쪽으로
         state.robots[0].path.clear();
         state.robots[0].ticks_until_repath = 0;
-        state = tick(&state);
+        // PATROL_MOVE_INTERVAL_TICKS 때문에 매 틱 이동하지 않으므로, 그
+        // 주기만큼 반복해서 실제로 한 걸음 내딛을 때까지 돌린다 —
+        // 비둘기집 원리로 이 횟수 안에는 반드시 이동 허용 틱이 낀다.
+        for _ in 0..PATROL_MOVE_INTERVAL_TICKS {
+            state = tick(&state);
+        }
+        assert_eq!(state.robots[0].pos, (0, 0), "그 사이 실제로 서쪽으로 한 칸 이동해 있어야 한다");
         assert_eq!(state.robots[0].facing, Direction::West);
 
         // 정지 상태에서도 마지막 방향을 유지해야 한다 — 이제 "목표 도착"은
@@ -644,8 +684,10 @@ mod tests {
         // "정지"를 의미하지 않는다. 진짜로 멈춘 상태를 만들려면 Failed로
         // 만든다 — plan_robot()이 이동/재계획/순찰 재배정을 전부 건너뛴다.
         state.robots[0].status = RobotStatus::Failed;
-        let held = tick(&state);
-        assert_eq!(held.robots[0].facing, Direction::West);
+        for _ in 0..PATROL_MOVE_INTERVAL_TICKS {
+            state = tick(&state);
+        }
+        assert_eq!(state.robots[0].facing, Direction::West);
     }
 
     #[test]
