@@ -9,7 +9,7 @@
 ## 작업 시작 전에
 
 1. **`docs/KANBAN.md`부터 읽어라.** Done/In Progress/Backlog 구조로 정확한 현재 상태(커밋 SHA 포함)를 담고 있다. `README.md`는 대외 공개용 요약이라 이 용도로는 부족하다.
-2. 다음 카드가 뭔지 모르겠으면 KANBAN의 Backlog 섹션과 `docs/superpowers/plans/`에 아직 계획 문서가 없는 항목(예: Plan 4/5)을 확인한다.
+2. 다음 카드가 뭔지 모르겠으면 KANBAN의 Backlog 섹션을 확인한다(Plan 1~5 전부 완료 — 남은 건 Backlog 항목이나 새 브레인스토밍).
 
 ## 작업 방식
 
@@ -23,4 +23,8 @@
 
 ## 지금 상태 (요약, 자세한 건 KANBAN.md)
 
-Plan 1(결정적 시뮬레이션 코어), Plan 2(WS 프로토콜), Plan 3(영속화+REST+관측가능성), 틱 처리시간 메트릭 보강, 로봇 내구도/고장/복구 기능까지 전부 완료. 다음은 **Plan 4(클라이언트 렌더링, Vite+TS+Canvas)** — 아직 계획 문서 자체가 없으니 브레인스토밍부터 시작해야 한다.
+**Plan 1~5 전부 완료** — 결정적 시뮬레이션 코어, WS 프로토콜, 영속화+REST+관측가능성, 틱 처리시간 메트릭, 로봇 내구도/고장/복구, 클라이언트 렌더링(Vite+TS+Canvas), 데모/배포(Docker+Fly.io)까지. 서버 143개+클라이언트 다수 테스트 통과.
+
+**배포**: `fly.toml`(Fly.io) + `Dockerfile`/`docker-compose.yml`(단일 컨테이너) 준비돼 있고, `main` push마다 자동 배포하는 `.github/workflows/fly-deploy.yml`도 있다 — 단 `FLY_API_TOKEN` GitHub 시크릿 등록 전까지는 계속 실패한다(사용자가 직접 등록해야 하는 남은 일). 정확한 절차는 README "## 배포" 절 참고.
+
+다음 작업은 KANBAN.md의 Backlog 항목 중에서 고르거나 새 기능을 브레인스토밍하는 것이다 — 정해진 다음 Plan은 없다.
