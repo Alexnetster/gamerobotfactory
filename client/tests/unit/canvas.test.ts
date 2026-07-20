@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isConveyorCell, sortRobotsForDrawing } from '../../src/render/canvas'
+import { isConveyorCell, sortRobotsForDrawing, conveyorFlowDirection } from '../../src/render/canvas'
 import type { InterpolatedRobot } from '../../src/state/interpolation'
 
 function robotAt(id: number, x: number, y: number): InterpolatedRobot {
@@ -30,6 +30,34 @@ describe('isConveyorCell', () => {
   it('leaves the right column and interior open (not belt) — U opens toward the sidebar', () => {
     expect(isConveyorCell(grid, 6, 3)).toBe(false)
     expect(isConveyorCell(grid, 3, 3)).toBe(false)
+  })
+})
+
+describe('conveyorFlowDirection', () => {
+  const grid = { width: 7, height: 6 }
+
+  it('returns null for non-belt cells', () => {
+    expect(conveyorFlowDirection(grid, 6, 3)).toBeNull()
+    expect(conveyorFlowDirection(grid, 3, 3)).toBeNull()
+  })
+
+  it('flows left along the top row (toward the left column)', () => {
+    expect(conveyorFlowDirection(grid, 3, 0)).toEqual({ dx: -1, dy: 0 })
+  })
+
+  it('flows down along the left column', () => {
+    expect(conveyorFlowDirection(grid, 0, 3)).toEqual({ dx: 0, dy: 1 })
+  })
+
+  it('flows right along the bottom row (toward the open sidebar-facing end)', () => {
+    expect(conveyorFlowDirection(grid, 3, 5)).toEqual({ dx: 1, dy: 0 })
+  })
+
+  it('resolves both corners consistently with a single continuous loop', () => {
+    // (0,0): 위쪽 변과 왼쪽 변이 만나는 모서리 — 왼쪽 변 방향(아래)을 따른다.
+    expect(conveyorFlowDirection(grid, 0, 0)).toEqual({ dx: 0, dy: 1 })
+    // (0, height-1): 왼쪽 변과 아래쪽 변이 만나는 모서리 — 아래쪽 변 방향(오른쪽)을 따른다.
+    expect(conveyorFlowDirection(grid, 0, 5)).toEqual({ dx: 1, dy: 0 })
   })
 })
 
