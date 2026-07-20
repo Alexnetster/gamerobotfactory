@@ -124,12 +124,14 @@ flyctl tokens create deploy   # 배포 전용 토큰 발급
 ```
 발급된 토큰을 GitHub 저장소 **Settings → Secrets and variables → Actions → New repository secret**에 이름 `FLY_API_TOKEN`으로 등록한다. 이 시크릿이 없으면 `flyctl deploy` 단계가 인증 실패로 즉시(수 초 안에) 실패한다 — 실제로 최초 push(`2218dc0`)에서 이 이유로 실패한 이력이 있다(`docs/KANBAN.md` Backlog 참고). 등록 후에는 아무 커밋이나 `main`에 push하면(또는 GitHub Actions 탭에서 워크플로를 수동 재실행하면) 자동으로 재시도된다.
 
-### 4) 확인
+### 4) 접속 확인
+
+이 앱의 주소는 **https://gamerobotfactory.fly.dev** 다(Fly.io는 `fly.toml`의 `app` 이름을 그대로 `<앱이름>.fly.dev` 도메인에 매핑한다 — `flyctl deploy`/`flyctl status` 출력에도 같은 주소가 찍힌다). 브라우저로 열면 바로 체험 가능하다(별도 쿼리 파라미터 불필요 — 클라이언트가 같은 오리진에서 자동으로 WS에 접속한다).
 
 ```bash
-flyctl status   # 배포된 URL 확인
+flyctl status   # 배포 상태 + 위 URL 재확인
+flyctl logs     # 문제가 생기면 실시간 로그 확인
 ```
-나온 URL을 열면 바로 체험 가능하다(별도 쿼리 파라미터 불필요 — 클라이언트가 같은 오리진에서 자동으로 WS에 접속한다). 문제가 생기면 `flyctl logs`로 실시간 로그를 볼 수 있다.
 
 ### 로컬에서 배포 이미지와 동일하게 실행 (Fly.io 계정 불필요)
 
