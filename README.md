@@ -85,32 +85,53 @@ cargo run --manifest-path server/Cargo.toml
 
 ## 배포
 
-[Fly.io](https://fly.io)에 단일 컨테이너로 배포하도록 `fly.toml`을 준비해뒀다. `flyctl launch`를 이미 한 번 실행해뒀고(앱 이름 `gamerobotfactory`, 리전 `nrt`), 그 결과 `fly.toml`의 볼륨 이름이 `data`로 재생성돼 있다 — 아래 볼륨 생성 명령은 반드시 이 이름과 일치해야 한다:
+[Fly.io](https://fly.io)에 단일 컨테이너(Docker)로 배포한다. 이 저장소엔 앱이 이미 등록돼 있으므로(`fly.toml`, 앱 이름 `gamerobotfactory`, 리전 `nrt`) **0~1단계는 이 앱을 처음부터 새로 만드는 게 아니라면 건너뛰어도 된다** — 다른 계정/새 앱으로 배포하려는 경우에만 필요.
+
+### 0) flyctl CLI 설치 (최초 1회, 컴퓨터당 1번)
+
+| OS | 명령 |
+|---|---|
+| Windows (PowerShell) | `pwsh -Command "iwr https://fly.io/install.ps1 -useb \| iex"` |
+| macOS | `brew install flyctl` |
+| Linux | `curl -L https://fly.io/install.sh \| sh` |
+
+설치 확인: `flyctl version`
+
+### 1) Fly.io 로그인 (최초 1회, 계정당 1번)
 
 ```bash
-# 최초 1회 (fly.toml이 이미 있고 flyctl launch도 이미 한 번 실행됨 — 새로 하는 경우만)
-flyctl launch --no-deploy   # 기존 설정 그대로 사용할지 물어보면 예
-flyctl volumes create data --size 1   # fly.toml의 [[mounts]] source와 반드시 일치해야 함
+flyctl auth login   # 브라우저가 열리며 로그인/가입(계정 없으면 무료로 만들 수 있음)
+```
 
-# 수동 배포
+### 2) 앱 등록 (이 저장소는 이미 돼 있음 — 새 앱을 만들 때만)
+
+```bash
+flyctl launch --no-deploy   # fly.toml이 이미 있으므로 기존 설정 그대로 쓸지 물어보면 예
+flyctl volumes create data --size 1   # 반드시 "data" — fly.toml의 [[mounts]] source와 일치해야 함
+```
+
+### 3) 배포
+
+**수동으로 한 번 배포**:
+```bash
 flyctl deploy
 ```
 
-### 자동 배포(CI/CD)
-
-`.github/workflows/fly-deploy.yml`이 `main` 브랜치에 push할 때마다 자동으로 `flyctl deploy --remote-only`를 실행하도록 이미 구성돼 있다. 동작하려면 GitHub 저장소 시크릿에 `FLY_API_TOKEN`을 등록해야 한다(한 번만 하면 됨):
+**또는 자동배포(CI/CD, 권장)** — `.github/workflows/fly-deploy.yml`이 `main`에 push할 때마다 알아서 `flyctl deploy --remote-only`를 실행하도록 이미 구성돼 있다. 동작하려면 GitHub 저장소 시크릿에 `FLY_API_TOKEN`을 한 번만 등록하면 된다:
 
 ```bash
 flyctl tokens create deploy   # 배포 전용 토큰 발급
-# 출력된 토큰을 GitHub 저장소 Settings → Secrets and variables → Actions → New repository secret
-# 이름: FLY_API_TOKEN
 ```
+발급된 토큰을 GitHub 저장소 **Settings → Secrets and variables → Actions → New repository secret**에 이름 `FLY_API_TOKEN`으로 등록한다. 이 시크릿이 없으면 `flyctl deploy` 단계가 인증 실패로 즉시(수 초 안에) 실패한다 — 실제로 최초 push(`2218dc0`)에서 이 이유로 실패한 이력이 있다(`docs/KANBAN.md` Backlog 참고). 등록 후에는 아무 커밋이나 `main`에 push하면(또는 GitHub Actions 탭에서 워크플로를 수동 재실행하면) 자동으로 재시도된다.
 
-이 시크릿이 없으면 `flyctl deploy` 단계가 인증 실패로 즉시(수 초 안에) 실패한다 — 실제로 최초 push(`2218dc0`)에서 이 이유로 실패한 이력이 있다(`docs/KANBAN.md` Backlog 참고). 시크릿을 등록한 뒤 아무 커밋이나 `main`에 push하면(또는 GitHub Actions 탭에서 위 워크플로를 수동 재실행하면) 재시도된다.
+### 4) 확인
 
-배포가 끝나면(수동이든 자동이든) `flyctl status`로 나온 URL을 열면 바로 체험 가능하다(별도 쿼리 파라미터 불필요 — 클라이언트가 같은 오리진에서 자동으로 WS에 접속한다).
+```bash
+flyctl status   # 배포된 URL 확인
+```
+나온 URL을 열면 바로 체험 가능하다(별도 쿼리 파라미터 불필요 — 클라이언트가 같은 오리진에서 자동으로 WS에 접속한다). 문제가 생기면 `flyctl logs`로 실시간 로그를 볼 수 있다.
 
-### 로컬에서 배포 이미지와 동일하게 실행
+### 로컬에서 배포 이미지와 동일하게 실행 (Fly.io 계정 불필요)
 
 ```bash
 docker compose up
