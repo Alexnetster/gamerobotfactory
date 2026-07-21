@@ -330,20 +330,42 @@ test.describe('client renders against a real server', () => {
     // 시작돼 픽업을 완료하면 화물을 든다. 이동 거리 + PICK_TICKS(20틱,
     // 약 1초) 감안해 8초 동안 재시도.
     const cargoColor = { r: 0xc9, g: 0x76, b: 0x2f }
+    const hasCargoColor = async () => page.evaluate((color) => {
+      const c = document.querySelector('canvas') as HTMLCanvasElement
+      const ctx = c.getContext('2d')!
+      const { width, height } = c
+      const data = ctx.getImageData(0, 0, width, height).data
+      for (let i = 0; i < data.length; i += 4) {
+        if (Math.abs(data[i] - color.r) < 10 && Math.abs(data[i + 1] - color.g) < 10 && Math.abs(data[i + 2] - color.b) < 10) {
+          return true
+        }
+      }
+      return false
+    }, cargoColor)
+
+    // 화물이 처음부터 항상 그려지는 회귀(robot.carrying 가드가 빠지거나
+    // 뒤집히는 경우)를 잡기 위해, 픽업이 끝나기 전에는 화물 아이콘이
+    // 아직 안 보이는지부터 확인한다. 스폰 직후(PICK_TICKS=20틱, 약 1초
+    // 미만 경과) 시점이라 이 시점엔 아직 픽업이 끝났을 리 없다.
+    //
+    // `.robot-count` 텍스트는 사이드바 DOM 갱신(서버 브로드캐스트 수신 시
+    // 바로 반영)만으로 확정되고, 캔버스는 별도의 requestAnimationFrame
+    // 루프가 그 다음 프레임에 그린다 — 그래서 텍스트 확인 직후 곧바로
+    // `hasCargoColor()`를 호출하면 새로 스폰된 로봇이 아직 캔버스에 한 번도
+    // 그려지기 전이라 화물 유무와 무관하게 항상 false가 나오는 레이스가
+    // 있었다(뮤테이션 `if (true || robot.carrying)`으로 실측: 3회 중 1회
+    // 이 경합 때문에 뮤턴트를 못 잡고 조용히 통과함). 최소 두 번의 실제
+    // 페인트가 끝난 뒤 상태를 읽도록 두 번의 `requestAnimationFrame`을
+    // 명시적으로 기다려서, "아직 안 그려짐"이 아니라 "그려졌는데 화물이
+    // 없음"을 검증하게 고쳤다.
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    expect(await hasCargoColor()).toBe(false)
+
     let found = false
     for (let attempt = 0; attempt < 40 && !found; attempt++) {
-      found = await page.evaluate((color) => {
-        const c = document.querySelector('canvas') as HTMLCanvasElement
-        const ctx = c.getContext('2d')!
-        const { width, height } = c
-        const data = ctx.getImageData(0, 0, width, height).data
-        for (let i = 0; i < data.length; i += 4) {
-          if (Math.abs(data[i] - color.r) < 10 && Math.abs(data[i + 1] - color.g) < 10 && Math.abs(data[i + 2] - color.b) < 10) {
-            return true
-          }
-        }
-        return false
-      }, cargoColor)
+      found = await hasCargoColor()
       if (!found) await page.waitForTimeout(200)
     }
     expect(found).toBe(true)
