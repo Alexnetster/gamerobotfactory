@@ -130,6 +130,13 @@ test.describe('client renders against a real server', () => {
         const ctx = c.getContext('2d')!
         const { width, height } = c
         const data = ctx.getImageData(0, 0, width, height).data
+        // b >= r는 슬레이트 그레이 그라디언트의 의도(B가 항상 R 이상)를
+        // 표현하려고 남겨뒀지만, 실측 뮤테이션 테스트(이 클로저에서 해당
+        // 절만 제거하고 5회 연속 실행) 결과 이 테스트를 통과/실패시키는 데
+        // 실제로는 기여하지 않는다 — 나머지 R/G/B 범위 경계만으로 이미
+        // 다리(#454c54)와 팔(#8b95a0) 색을 걸러내기 충분하기 때문. 안전망
+        // 차원에서 남겨두는 것이니, 나중에 지워도 안전하다고 가정하지 말고
+        // 지우기 전에 뮤테이션 테스트를 다시 돌려볼 것.
         const isBodyColor = (r: number, g: number, b: number) =>
           r >= 80 && r <= 130 && g >= 90 && g <= 140 && b >= 95 && b <= 145 && b >= r
         const matches = (x: number, y: number): boolean => {
@@ -210,10 +217,15 @@ test.describe('client renders against a real server', () => {
     }
     if (!result) throw new Error('20회 재시도 후에도 canvas에서 로봇 몸체 픽셀을 찾지 못함')
 
-    // 몸체 채우기 색(그라디언트: #6b7480 ~ #5a636e, 슬레이트 그레이로 B가
-    // R보다 항상 크거나 같음)이 26x20 박스 평균에 지배적으로 반영되는지 확인.
+    // 몸체 채우기 색(그라디언트: #6b7480(R107,G116,B128) ~ #5a636e(R90,G99,B110),
+    // 슬레이트 그레이로 B가 R보다 항상 크거나 같음)이 26x20 박스 평균에
+    // 지배적으로 반영되는지 확인. R 범위 하나만 보면 다른 회색 톤과
+    // 겹칠 여지가 있어, 그라디언트의 G 채널(약 99~116)도 별도로 확인해
+    // 판별력을 보강한다.
     expect(result.avgR).toBeGreaterThan(70)
     expect(result.avgR).toBeLessThan(140)
+    expect(result.avgG).toBeGreaterThan(95)
+    expect(result.avgG).toBeLessThan(135)
   })
 
   test('shows the selected robot info in the sidebar after clicking it', async ({ page }) => {
