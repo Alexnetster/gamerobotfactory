@@ -173,6 +173,25 @@ async fn production_only_increases_after_a_robot_completes_a_full_work_cycle() {
     let total_production_ever: f64 = history.iter().filter_map(|row| row["total_production"].as_f64()).sum();
     assert!(total_production_ever > 0.0, "expected at least one robot to complete a full pick/place cycle within 6 seconds, got rows: {history:?}");
 
+    // A full pick+place cycle takes at least PICK_TICKS + PLACE_TICKS ticks
+    // (ignoring travel time, which only makes cycles slower/fewer). At 20Hz,
+    // 6 seconds is at most 120 ticks, so no robot can complete more than
+    // 120 / (PICK_TICKS + PLACE_TICKS) full cycles in this window even in
+    // the best case (already standing on the pickup/place point every time).
+    // +1 cycle of slack per robot absorbs legitimate timing jitter (test
+    // scheduling delays, GET latency) without absorbing an order-of-magnitude
+    // regression like crediting every robot on every tick.
+    const ROBOT_COUNT: u32 = 3;
+    const TEST_WINDOW_TICKS: u32 = 20 * 6; // 20Hz tick rate, 6s sleep
+    let max_cycles_per_robot = TEST_WINDOW_TICKS / (sim_core::sim::PICK_TICKS + sim_core::sim::PLACE_TICKS) + 1;
+    let max_plausible_production =
+        ROBOT_COUNT as f64 * max_cycles_per_robot as f64 * sim_core::sim::UNIT_PER_CYCLE as f64;
+
+    assert!(
+        total_production_ever <= max_plausible_production,
+        "production grew far faster than a real pick/place cycle allows ({total_production_ever} > {max_plausible_production}) — likely crediting robots that haven't actually completed a placement, got rows: {history:?}"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
