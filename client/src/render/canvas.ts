@@ -1,4 +1,5 @@
 import { gridToScreen, zOrderKey, wristWorldOffset, elbowWorldOffset, TILE_WIDTH, TILE_HEIGHT, RENDER_SCALE } from './projection'
+import { legAnglesForPhase } from './gait'
 import type { InterpolatedRobot } from '../state/interpolation'
 import type { ConveyorView } from '../net/protocol'
 
@@ -170,6 +171,22 @@ function drawConveyorChevrons(
   drawChevronAt(offset)
 }
 
+const BODY_WIDTH = 26
+const BODY_HEIGHT = 20
+const BODY_DEPTH_X = 4 // 위/오른쪽 슬리버가 오른쪽 위로 밀리는 정도(3/4 정면 원근감)
+const BODY_DEPTH_Y = 4
+const HIP_X_OFFSETS = [-10, 10, -5, 5] // 앞왼쪽, 앞오른쪽, 뒤왼쪽, 뒤오른쪽
+const THIGH_LEN = 12
+const SHIN_LEN = 16
+// 엉덩이 관절점을 몸통 밑면보다 이만큼 위(안쪽)에 둔다 — 다리를 먼저 그리고
+// 몸통을 나중에 그리므로, 몸통 사각형이 이 겹친 부분을 덮어서 다리가
+// 몸통에서 안 떨어진 것처럼 보인다. 뒷다리 시작점이 몸통 바깥 허공이라
+// 걷는 동안 눈에 띄게 떠 보이던 버그(2026-07-21 렌더링 브레인스토밍에서
+// 실측)를 이 겹침으로 방지한다.
+const LEG_BODY_OVERLAP = 4
+const LEG_COLOR = '#454c54'
+const SHOULDER_BLOCK_SIZE = 6
+
 function drawRobot(ctx: CanvasRenderingContext2D, robot: InterpolatedRobot, selected: boolean): void {
   const screen = gridToScreen(robot.renderPos.x, robot.renderPos.y)
   const armPoseInput = {
@@ -184,46 +201,107 @@ function drawRobot(ctx: CanvasRenderingContext2D, robot: InterpolatedRobot, sele
   ctx.save()
   ctx.translate(screen.x, screen.y)
 
-  // 다리 — 몸체 바깥으로 뚜렷하게 뻗어 나오는 4족 자세가 보이도록 몸체
-  // 폭(22px)보다 더 벌리고(±14), 발끝에 작은 원을 찍어 다리 끝이 어디서
-  // 끝나는지 명확히 한다. 이렇게 안 하면 짧은 세로선만 보여서 몸체 밑에
-  // 거의 안 보이고, 로봇 전체가 가오리처럼 미끄러지는 것처럼 보인다.
-  ctx.strokeStyle = '#6b4810'
-  ctx.fillStyle = '#6b4810'
-  ctx.lineWidth = 3
+  const bodyBottomY = -bodyLift
+  const bodyTopY = bodyBottomY - BODY_HEIGHT
+  const hipY = bodyBottomY - LEG_BODY_OVERLAP
+
+  // 다리 4개 — 엉덩이→무릎→발을 각각 하나의 연속된 stroke path로 그린다
+  // (beginPath/moveTo/lineTo/lineTo/stroke 한 번). 별도 조각을 이어붙이지
+  // 않으므로 굽는 지점(무릎)에 색/굵기가 다른 이음매가 생길 수가 없다 —
+  // "관절 마디가 시각적으로 끊어지면 안 됨" 제약(설계문서 §3-1)을 여러
+  // 조각을 세심하게 맞추는 대신 애초에 조각을 하나로 만들어서 만족시킨다.
+  ctx.strokeStyle = LEG_COLOR
+  ctx.lineWidth = 4
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
   for (let i = 0; i < 4; i++) {
     const phase = (robot.leg_cycle_progress + i * 0.25) % 1
-    const legX = (i < 2 ? -14 : 14) + (phase < 0.5 ? -4 : 4)
-    const footY = -bodyLift + 14
+    const { hipDeg, kneeDeg } = legAnglesForPhase(phase)
+    const hipRad = (hipDeg * Math.PI) / 180
+    const shinRad = ((hipDeg + kneeDeg) * Math.PI) / 180
+    const hipX = HIP_X_OFFSETS[i]
+    const kneeX = hipX + THIGH_LEN * Math.sin(hipRad)
+    const kneeY = hipY + THIGH_LEN * Math.cos(hipRad)
+    const footX = kneeX + SHIN_LEN * Math.sin(shinRad)
+    const footY = kneeY + SHIN_LEN * Math.cos(shinRad)
+
     ctx.beginPath()
-    ctx.moveTo(legX, -bodyLift)
-    ctx.lineTo(legX, footY)
+    ctx.moveTo(hipX, hipY)
+    ctx.lineTo(kneeX, kneeY)
+    ctx.lineTo(footX, footY)
     ctx.stroke()
-    ctx.beginPath()
-    ctx.arc(legX, footY, 2, 0, Math.PI * 2)
-    ctx.fill()
   }
 
-  const bodyGradient = ctx.createLinearGradient(-11, -bodyLift - 8, 11, -bodyLift + 8)
-  bodyGradient.addColorStop(0, '#ffd27a')
-  bodyGradient.addColorStop(1, '#d99a2e')
+  // 몸통 — 정면(큰 앞면) + 위/오른쪽 슬리버로 살짝 입체감을 주는 3/4 정면
+  // 각도(설계문서 §2). 바닥 타일은 여전히 엄격한 아이소메트릭이지만, 로봇
+  // 몸체만 이렇게 그려야 정면 실루엣이 뚜렷해진다.
+  const bodyGradient = ctx.createLinearGradient(-BODY_WIDTH / 2, bodyTopY, BODY_WIDTH / 2, bodyBottomY)
+  bodyGradient.addColorStop(0, '#6b7480')
+  bodyGradient.addColorStop(1, '#5a636e')
   ctx.fillStyle = bodyGradient
-  ctx.fillRect(-11, -bodyLift - 8, 22, 16)
+  ctx.fillRect(-BODY_WIDTH / 2, bodyTopY, BODY_WIDTH, BODY_HEIGHT)
+
+  ctx.fillStyle = '#454c54'
+  ctx.beginPath()
+  ctx.moveTo(BODY_WIDTH / 2, bodyTopY)
+  ctx.lineTo(BODY_WIDTH / 2 + BODY_DEPTH_X, bodyTopY - BODY_DEPTH_Y)
+  ctx.lineTo(BODY_WIDTH / 2 + BODY_DEPTH_X, bodyBottomY - BODY_DEPTH_Y)
+  ctx.lineTo(BODY_WIDTH / 2, bodyBottomY)
+  ctx.closePath()
+  ctx.fill()
+
+  ctx.fillStyle = '#6b7480'
+  ctx.beginPath()
+  ctx.moveTo(-BODY_WIDTH / 2, bodyTopY)
+  ctx.lineTo(BODY_WIDTH / 2, bodyTopY)
+  ctx.lineTo(BODY_WIDTH / 2 + BODY_DEPTH_X, bodyTopY - BODY_DEPTH_Y)
+  ctx.lineTo(-BODY_WIDTH / 2 + BODY_DEPTH_X, bodyTopY - BODY_DEPTH_Y)
+  ctx.closePath()
+  ctx.fill()
+
+  // 패널 이음선 강조 스트라이프(정면 상단)
+  ctx.fillStyle = '#e8823a'
+  ctx.fillRect(-BODY_WIDTH / 2, bodyTopY, BODY_WIDTH, 4)
+
   if (selected) {
     ctx.strokeStyle = '#ffffff'
     ctx.lineWidth = 2
-    ctx.strokeRect(-11, -bodyLift - 8, 22, 16)
+    ctx.strokeRect(-BODY_WIDTH / 2, bodyTopY, BODY_WIDTH, BODY_HEIGHT)
   }
 
-  // 팔 — 어깨-팔꿈치-손목 두 세그먼트로 그려야 elbow_angle에 따른 실제
-  // 굽힘이 보인다. 어깨에서 손목까지 직선 하나로만 이으면(예전 방식)
-  // 팔이 항상 뻣뻣한 막대처럼 보여서 팔꿈치 각도가 있어도 티가 안 났다.
-  ctx.strokeStyle = '#a06f1a'
-  ctx.lineWidth = 3
+  // 센서 헤드 — 눈 색으로 "지금 팔이 작업 중인가"만 나타낸다(로봇의
+  // Failed/Repairing 여부는 이미 정지 여부로 구분되므로 여기서는 안 다룸
+  // — 설계문서 §5).
+  ctx.fillStyle = '#3a4048'
+  ctx.fillRect(-6, bodyTopY - 2, 12, 7)
+  ctx.fillStyle = robot.task === 'Idle' ? '#8a8f96' : '#ffd23a'
   ctx.beginPath()
-  ctx.moveTo(0, -bodyLift)
-  ctx.lineTo(elbowScreen.x - screen.x, elbowScreen.y - screen.y - bodyLift)
-  ctx.lineTo(wristScreen.x - screen.x, wristScreen.y - screen.y - bodyLift)
+  ctx.arc(0, bodyTopY + 1.5, 2.5, 0, Math.PI * 2)
+  ctx.fill()
+
+  // 어깨 장착 블록 + 팔 — 어깨→팔꿈치→손목을 하나의 stroke path로 이어서
+  // (다리와 같은 이유로) 이음매 없이 매끈하게 굽어 보이게 한다. 실제 서버
+  // IK가 계산한 shoulder/elbow_angle(`arm_pose`)은 그대로 쓰고, 그 결과를
+  // 그리는 원점만 몸통 중앙에서 오른쪽 슬리버 위 모서리(어깨 위치)로
+  // 옮긴다.
+  const shoulderX = BODY_WIDTH / 2 - 2
+  const shoulderY = bodyTopY + 4
+  ctx.fillStyle = '#3a4048'
+  ctx.fillRect(shoulderX - SHOULDER_BLOCK_SIZE / 2, shoulderY - SHOULDER_BLOCK_SIZE / 2, SHOULDER_BLOCK_SIZE, SHOULDER_BLOCK_SIZE)
+
+  const elbowDx = elbowScreen.x - screen.x
+  const elbowDy = elbowScreen.y - screen.y
+  const wristDx = wristScreen.x - screen.x
+  const wristDy = wristScreen.y - screen.y
+
+  ctx.strokeStyle = '#8b95a0'
+  ctx.lineWidth = 4
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.beginPath()
+  ctx.moveTo(shoulderX, shoulderY)
+  ctx.lineTo(shoulderX + elbowDx, shoulderY + elbowDy)
+  ctx.lineTo(shoulderX + wristDx, shoulderY + wristDy)
   ctx.stroke()
 
   ctx.restore()
