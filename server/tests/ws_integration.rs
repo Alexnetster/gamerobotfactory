@@ -233,6 +233,54 @@ async fn repair_robot_on_a_healthy_robot_is_rejected_without_crashing_the_connec
     assert!(still_connected, "connection should survive a RepairRobot command rejected for a non-failed robot");
 }
 
+#[tokio::test]
+async fn carrying_flag_flows_over_the_wire_during_a_work_cycle() {
+    // 컨베이어는 기본적으로 running:true이므로, 로봇이 하나라도 생기면
+    // 작업 사이클(Picking -> carrying:true -> Placing -> carrying:false)이
+    // 별도 커맨드 없이 자동으로 시작된다. 델타 압축은 RobotView 전체를
+    // PartialEq로 비교해 "안 바뀌면 안 보낸다"는 식으로 동작하므로, 이
+    // 테스트는 carrying 필드가 실제로 (a) 와이어에 실리고 (b) 작업 사이클
+    // 도중 true로 뒤집히는 것을 실제 서버 프로세스 + 실제 WS 클라이언트로
+    // 확인한다(구조체 리터럴/단위테스트만으로는 델타 압축 배선 문제를
+    // 못 잡는다).
+    let server = spawn_server();
+
+    let url = format!("ws://127.0.0.1:{}/ws", server.port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("failed to connect to ws endpoint");
+    let (mut write, mut read) = ws_stream.split();
+
+    let _first = read.next().await.expect("stream ended early");
+
+    write.send(Message::Text(r#"{"type":"SetRobotCount","count":1}"#.to_string())).await.unwrap();
+
+    // Snapshot과 Delta 양쪽 모두에서 로봇 배열을 찾아, 그 중 하나라도
+    // carrying:true를 가진 로봇을 보고하면 성공으로 친다. PICK_TICKS는
+    // 20틱(20Hz 기준 약 1초)이지만 로봇이 픽업 지점까지 이동하는 시간이
+    // 먼저 필요하므로 데드라인을 넉넉히 8초로 잡는다.
+    let saw_carrying_true = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let Some(Ok(Message::Text(text))) = read.next().await else { return false };
+            let Ok(json) = serde_json::from_str::<Value>(&text) else { continue };
+            let robots = match json["kind"].as_str() {
+                Some("Delta") => json["changed_robots"].as_array(),
+                Some("Snapshot") => json["robots"].as_array(),
+                _ => None,
+            };
+            if let Some(robots) = robots {
+                if robots.iter().any(|r| r["carrying"] == Value::Bool(true)) {
+                    return true;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    assert!(saw_carrying_true, "expected at least one message to report carrying:true for the robot during its work cycle");
+}
+
 // NOTE: an earlier version of this file had a black-box
 // `lagged_client_resyncs_instead_of_disconnecting` test here that simply
 // stopped reading the client socket for 3+ seconds and then asserted the
