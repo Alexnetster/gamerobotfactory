@@ -8,7 +8,7 @@
 
 ## 퀵스타트
 
-**라이브 데모**: <배포 URL — flyctl deploy 후 채움>를 열면 클론/설치 없이 바로 체험 가능(아직 실제 배포 전이라 자리 표시만 있음 — 배포는 본인 Fly.io 계정으로 진행하는 별도 단계, 자세한 건 아래 "배포" 절 참고).
+**라이브 데모**: https://gamerobotfactory.fly.dev 를 열면 클론/설치 없이 바로 체험 가능(Fly.io에 배포된 실제 인스턴스 — 배포 절차 자체는 아래 "배포" 절 참고).
 
 **로컬에서**: 저장소를 클론한 뒤
 
@@ -23,7 +23,7 @@ docker compose up
 - **결정적 병렬 틱**: 매 틱 `rayon`으로 로봇들을 병렬 갱신하되, 직전 틱의 스냅샷만 읽는 더블 버퍼링 + 로봇 ID 기반 타이브레이크로 동시 이동 충돌을 결정적으로 해소한다. 몇 번을 돌려도 같은 입력이면 같은 결과가 나온다 — `tick_is_deterministic`/`tick_never_produces_collisions` proptest로 검증.
 - **장애 격리**: 로봇 한 대의 갱신 로직이 패닉해도(`catch_unwind`) 그 틱은 스킵될 뿐 나머지 로봇과 다른 클라이언트 연결에는 영향이 없다. `safe_tick`이 스킵된 틱 수를 `tick_panics_total` 메트릭으로 노출한다 — "조용히 멈추는" 실패를 관측 가능하게 만든 것.
 - **클라이언트별 델타 동기화 + 무손실 재접속**: 매 틱 전체 상태 대신 바뀐 로봇만 보내고(`Delta`), 연결이 브로드캐스트 채널 용량을 넘겨 뒤처지면(Lagged) 끊는 대신 전체 스냅샷으로 재동기화한다. 세션 토큰(UUID)으로 30초 유예시간 내 재접속을 지원.
-- **성능 목표를 실측 가능하게**: 틱 처리시간(락 획득~스냅샷/델타 계산)을 `tick_duration_seconds` Prometheus 히스토그램으로 노출한다 — 목표(p99 < 10ms, 20Hz 틱 예산 50ms)를 정확히 버킷 경계로 잡아둬서 `histogram_quantile`로 바로 조회 가능. "성능 목표를 문서에만 적어두고 측정 수단이 없는" 흔한 함정을 피한 것. (배포 환경 실측치: 배포 완료 후 기록 예정 — `client/scripts/perf-check.mjs <실제 URL>`로 측정하는 스크립트는 이미 준비돼 있음.)
+- **성능 목표를 실측 가능하게**: 틱 처리시간(락 획득~스냅샷/델타 계산)을 `tick_duration_seconds` Prometheus 히스토그램으로 노출한다 — 목표(p99 < 10ms, 20Hz 틱 예산 50ms)를 정확히 버킷 경계로 잡아둬서 `histogram_quantile`로 바로 조회 가능. "성능 목표를 문서에만 적어두고 측정 수단이 없는" 흔한 함정을 피한 것. 배포된 인스턴스 실측치가 필요하면 `node client/scripts/perf-check.mjs https://gamerobotfactory.fly.dev`로 직접 측정할 수 있다.
 - **리뷰로 잡아낸 실질 버그들**: 통합테스트 중 하나가 "그럴듯해 보이지만 실제로는 아무것도 검증하지 않는" 공허한 테스트였음을 뮤테이션 테스트(동작을 일부러 깨고 테스트가 여전히 통과하는지 확인)로 발견해 재작성했고, `SetRobotCount`에 상한이 없어 무제한 메모리 할당으로 서버를 멈출 수 있었던 DoS 버그도 리뷰 과정에서 잡았다. 자세한 내용은 [`docs/KANBAN.md`](docs/KANBAN.md) 참고.
 
 ## 아키텍처
@@ -255,6 +255,6 @@ curl http://127.0.0.1:54321/metrics
 
 ## 다음 단계
 
-Plan 1~5로 계획됐던 작업은 전부 완료됐다. 남은 건 사용자가 실제로 `flyctl deploy`를 실행해 라이브 URL을 얻고(README "배포" 절 참고), `client/scripts/perf-check.mjs <실제 URL>`로 배포 환경 실측치를 위 "핵심 엔지니어링 결정"/"퀵스타트" 절의 자리 표시에 채워 넣는 것 — 이건 사용자 본인의 Fly.io 계정이 필요해 이 저장소의 작업 범위 밖이다. 그 외 남은 개선 아이디어는 [`docs/KANBAN.md`](docs/KANBAN.md)의 Backlog 절 참고.
+Plan 1~5로 계획됐던 작업은 전부 완료됐고, https://gamerobotfactory.fly.dev 로 실제 배포도 끝났다. 남은 개선 아이디어는 [`docs/KANBAN.md`](docs/KANBAN.md)의 Backlog 절 참고.
 
 상세 계획은 [`docs/superpowers/plans/`](docs/superpowers/plans/)에 있다.
