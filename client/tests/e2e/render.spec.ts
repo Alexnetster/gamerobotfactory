@@ -97,13 +97,15 @@ async function currentRobotCount(page: import('@playwright/test').Page): Promise
 // 실행에서 안정적으로 통과했다(아래 기록 참고). 다만 위치를 찾는 로직
 // 자체(래스터 스캔에서 처음 만난 색-일치 픽셀 하나만 믿고 그 주변 좁은 창을
 // 평균 내는 것)는 별개의 취약점이었다 — 다른 로봇의 몸체 가장자리나 바닥
-// 타일 경계의 앤티에일리어싱이 우연히 isBodyColor 조건(R>190 && G∈[130,225]
-// && B<140 — canvas.ts::drawRobot의 bodyGradient #ffd27a~#d99a2e와 대조
-// 확인, 팔 스트로크 #a06f1a는 R=160<190이라 안 걸림)을 몇 픽셀만 만족시킬
+// 타일 경계의 앤티에일리어싱이 우연히 isBodyColor 조건을 몇 픽셀만 만족시킬
 // 수 있고, 그 노이즈가 래스터 순서상 실제 몸체보다 먼저 걸리면 시드 자체가
 // 잘못된 위치가 된다. 이를 색-일치 픽셀 전체를 4-연결 성분으로 묶어 가장 큰
-// 덩어리(실제 몸체 사각형 22x16=352px)의 무게중심을 쓰는 방식으로
+// 덩어리(실제 몸체 사각형 26x20=520px)의 무게중심을 쓰는 방식으로
 // 대체했다 — 노이즈는 최소 크기 기준(MIN_BODY_PIXELS)에 못 미쳐 걸러진다.
+//
+// isBodyColor는 canvas.ts::drawRobot의 새 몸체 그라디언트(#6b7480~#5a636e,
+// 슬레이트 그레이 — 2026-07-21 로봇 외형 리디자인)와 대조 확인한다. 팔
+// 스트로크(#8b95a0)나 다리(#454c54)는 R/G/B가 이 범위 밖이라 안 걸린다.
 const MIN_BODY_PIXELS = 80
 
 test.describe('client renders against a real server', () => {
@@ -128,7 +130,8 @@ test.describe('client renders against a real server', () => {
         const ctx = c.getContext('2d')!
         const { width, height } = c
         const data = ctx.getImageData(0, 0, width, height).data
-        const isBodyColor = (r: number, g: number, b: number) => r > 190 && g >= 130 && g <= 225 && b < 140
+        const isBodyColor = (r: number, g: number, b: number) =>
+          r >= 80 && r <= 130 && g >= 90 && g <= 140 && b >= 95 && b <= 145 && b >= r
         const matches = (x: number, y: number): boolean => {
           const i = (y * width + x) * 4
           return isBodyColor(data[i], data[i + 1], data[i + 2])
@@ -181,12 +184,12 @@ test.describe('client renders against a real server', () => {
         const cx = best.sumX / best.count
         const cy = best.sumY / best.count
 
-        // 같은 data 버퍼에서 바로 몸체 사각형(22x16) 크기 박스의 색을
+        // 같은 data 버퍼에서 바로 몸체 사각형(26x20) 크기 박스의 색을
         // 평균 낸다 — 위치를 반환한 뒤 별도 호출로 색을 "다시" 읽으면 그
         // 사이 로봇이 이동해 버려 엉뚱한 빈 칸을 읽을 수 있다(위 파일 상단
         // 주석 참고, 실측 재현됨).
-        const w = 22
-        const h = 16
+        const w = 26
+        const h = 20
         const x0 = Math.max(0, Math.round(cx - w / 2))
         const y0 = Math.max(0, Math.round(cy - h / 2))
         let sumR = 0
@@ -207,9 +210,10 @@ test.describe('client renders against a real server', () => {
     }
     if (!result) throw new Error('20회 재시도 후에도 canvas에서 로봇 몸체 픽셀을 찾지 못함')
 
-    // 몸체 채우기 색(그라디언트: #ffd27a ~ #d99a2e, R>G)이 22x16 박스 평균에
-    // 지배적으로 반영되는지 확인한다.
-    expect(result.avgR).toBeGreaterThan(result.avgG)
+    // 몸체 채우기 색(그라디언트: #6b7480 ~ #5a636e, 슬레이트 그레이로 B가
+    // R보다 항상 크거나 같음)이 26x20 박스 평균에 지배적으로 반영되는지 확인.
+    expect(result.avgR).toBeGreaterThan(70)
+    expect(result.avgR).toBeLessThan(140)
   })
 
   test('shows the selected robot info in the sidebar after clicking it', async ({ page }) => {
