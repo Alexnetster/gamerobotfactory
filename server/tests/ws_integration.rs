@@ -256,9 +256,13 @@ async fn carrying_flag_flows_over_the_wire_during_a_work_cycle() {
     write.send(Message::Text(r#"{"type":"SetRobotCount","count":1}"#.to_string())).await.unwrap();
 
     // Snapshot과 Delta 양쪽 모두에서 로봇 배열을 찾아, 그 중 하나라도
-    // carrying:true를 가진 로봇을 보고하면 성공으로 친다. PICK_TICKS는
-    // 20틱(20Hz 기준 약 1초)이지만 로봇이 픽업 지점까지 이동하는 시간이
-    // 먼저 필요하므로 데드라인을 넉넉히 8초로 잡는다.
+    // carrying:true를 가진 로봇을 보고하면 성공으로 친다. 로봇 id 0의
+    // 스폰 지점(0,0)이 work_points(0, ..)의 픽업 지점과 우연히 일치해서
+    // (deterministic_roll(0, ..)이 항상 0을 내므로) 이 테스트는 실제로는
+    // 이동 없이 곧바로 PICK_TICKS(20틱, 20Hz 기준 약 1초)만 기다린다 —
+    // 그래도 데드라인은 10x10 그리드 최악의 이동 거리(대각선 최대 18칸,
+    // ~54틱)까지 감안해 넉넉히 8초로 잡는다(다른 id로 바뀌거나 그리드
+    // 크기가 바뀌어도 안전하게 통과하도록).
     let saw_carrying_true = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let Some(Ok(Message::Text(text))) = read.next().await else { return false };
