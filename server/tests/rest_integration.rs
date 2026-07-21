@@ -129,6 +129,53 @@ async fn stats_history_reflects_persisted_rows_after_running() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+#[tokio::test]
+async fn production_only_increases_after_a_robot_completes_a_full_work_cycle() {
+    let db_path = temp_db_path("production-cycle");
+    let server = spawn_server_with_isolated_db(&db_path);
+    let base = format!("http://127.0.0.1:{}", server.port);
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{base}/api/config"))
+        .json(&serde_json::json!({ "persist_every_n_ticks": 1 }))
+        .send()
+        .await
+        .expect("POST /api/config failed");
+
+    // ToggleConveyor 없이도 서버 기본값(Conveyor::new()의 running: true)이
+    // 이미 켜져 있으므로 로봇 수만 늘리면 곧바로 작업 사이클이 시작된다.
+    // 픽업 지점까지의 이동 + PICK_TICKS(20) + 배치 지점까지의 이동 +
+    // PLACE_TICKS(20)를 감안해 넉넉히 6초 기다린다.
+    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/ws", server.port))
+        .await
+        .expect("failed to connect WS");
+    use futures_util::{SinkExt, StreamExt};
+    let (mut write, _read) = ws_stream.split();
+    write
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({ "type": "SetRobotCount", "count": 3 }).to_string(),
+        ))
+        .await
+        .expect("failed to send SetRobotCount");
+
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    let history: Vec<serde_json::Value> = client
+        .get(format!("{base}/api/stats/history"))
+        .send()
+        .await
+        .expect("GET /api/stats/history failed")
+        .json()
+        .await
+        .expect("response was not valid JSON");
+
+    let total_production_ever: f64 = history.iter().filter_map(|row| row["total_production"].as_f64()).sum();
+    assert!(total_production_ever > 0.0, "expected at least one robot to complete a full pick/place cycle within 6 seconds, got rows: {history:?}");
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
 /// Prometheus 텍스트 포맷에서 `metric_name value` 형태의 한 줄을 찾아 값을
 /// `i64`로 파싱한다. 단순히 이름이 텍스트에 등장하는지만 보면 카운터가
 /// 실제로 증가했는지는 검증하지 못한다 — 레지스트리에 등록만 되어 있으면

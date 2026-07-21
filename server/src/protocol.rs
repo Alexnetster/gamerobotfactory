@@ -129,6 +129,7 @@ pub struct RobotView {
     pub path: Vec<WireCellId>,
     pub facing: WireDirection,
     pub arm_pose: WireArmPose,
+    pub carrying: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -179,6 +180,7 @@ impl From<&Robot> for RobotView {
             path: r.path.iter().map(|&c| c.into()).collect(),
             facing: r.facing.into(),
             arm_pose: arm_pose_for(r),
+            carrying: r.carrying,
         }
     }
 }

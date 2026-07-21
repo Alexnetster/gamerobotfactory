@@ -48,6 +48,7 @@ mod tests {
             path: Vec::new(),
             facing: WireDirection::East,
             arm_pose: WireArmPose { shoulder_angle: 0.0, elbow_angle: 0.0 },
+            carrying: false,
         }
     }
 

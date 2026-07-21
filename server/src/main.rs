@@ -135,6 +135,21 @@ fn detect_status_transitions(
     events
 }
 
+/// 이전 틱과 이번 틱의 로봇별 `carrying` 값을 ID 기준으로 비교해, 방금
+/// 배치를 완료한(carrying: true -> false) 로봇 ID를 찾아낸다.
+/// `detect_status_transitions`와 같은 이유(실제 tick()/작업 사이클
+/// 타이밍 없이도 결정적으로 단위테스트하기 위함)로 순수 함수로 분리했다.
+fn detect_completed_placements(previous_robots: &[protocol::RobotView], current_robots: &[protocol::RobotView]) -> Vec<u32> {
+    let mut completed = Vec::new();
+    for current in current_robots {
+        let Some(previous) = previous_robots.iter().find(|p| p.id == current.id) else { continue };
+        if previous.carrying && !current.carrying {
+            completed.push(current.id);
+        }
+    }
+    completed
+}
+
 /// 백그라운드에서 20Hz로 시뮬레이션을 전진시키고, 마지막으로 브로드캐스트한
 /// 스냅샷과 비교한 델타를 연결된 모든 클라이언트에 보낸다. `state.lock()`
 /// 가드는 이 블록 안(동기 연산: tick/생산량 집계/스냅샷 변환)에서만
@@ -174,12 +189,6 @@ fn spawn_tick_loop(
                     None => metrics.tick_panics_total.inc(),
                 }
 
-                let mut total_production_value = 0.0_f32;
-                if guard.conveyor.running {
-                    let units: HashMap<u32, f32> = guard.sim.robots.iter().map(|r| (r.id, 0.01)).collect();
-                    total_production_value = total_production(&guard.sim.robots, &units);
-                }
-
                 metrics.ticks_total.inc();
                 metrics.robot_count.set(guard.sim.robots.len() as i64);
                 metrics.robots_repairing.set(
@@ -192,16 +201,19 @@ fn spawn_tick_loop(
                 );
 
                 let current_snapshot = to_snapshot(&guard, uuid::Uuid::nil());
-                let (delta, failure_events) = match (&last_snapshot, &current_snapshot) {
+                let (delta, failure_events, total_production_value) = match (&last_snapshot, &current_snapshot) {
                     (
                         protocol::ServerMessage::Snapshot { conveyor: prev_conveyor, robots: prev_robots, .. },
                         protocol::ServerMessage::Snapshot { tick: cur_tick, conveyor: cur_conveyor, robots: cur_robots, .. },
                     ) => {
                         let delta = compute_delta(*prev_conveyor, prev_robots, *cur_tick, *cur_conveyor, cur_robots);
                         let events = detect_status_transitions(prev_robots, cur_robots, *cur_tick);
-                        (delta, events)
+                        let completed = detect_completed_placements(prev_robots, cur_robots);
+                        let units: HashMap<u32, f32> = completed.iter().map(|&id| (id, sim_core::sim::UNIT_PER_CYCLE)).collect();
+                        let production = total_production(&guard.sim.robots, &units);
+                        (delta, events, production)
                     }
-                    _ => (current_snapshot.clone(), Vec::new()),
+                    _ => (current_snapshot.clone(), Vec::new(), 0.0_f32),
                 };
 
                 for event in &failure_events {
@@ -385,6 +397,7 @@ mod tests {
             path: Vec::new(),
             facing: protocol::WireDirection::East,
             arm_pose: protocol::WireArmPose { shoulder_angle: 0.0, elbow_angle: 0.0 },
+            carrying: false,
         }
     }
 
