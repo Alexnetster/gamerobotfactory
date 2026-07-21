@@ -812,10 +812,17 @@ mod tests {
         assert_eq!(state.robots[0].task, Task::Picking);
         assert!(!state.robots[0].carrying);
 
-        for _ in 0..PICK_TICKS {
+        // PICK_TICKS - 1번째 틱까지는 아직 카운트다운 중이어야 한다 —
+        // 여기서 멈추고 확인하지 않으면 off-by-one(예: `== 0`을 실수로
+        // `<= 1`로 바꿔 한 틱 일찍 끝내는 회귀)이 통과할 수 있다.
+        for _ in 0..PICK_TICKS - 1 {
             state = tick(&state, true);
         }
-        assert!(state.robots[0].carrying, "PICK_TICKS번 틱이 지나면 화물을 들고 있어야 한다");
+        assert!(!state.robots[0].carrying, "PICK_TICKS - 1번 틱까지는 아직 화물을 들면 안 된다");
+        assert_eq!(state.robots[0].task, Task::Picking, "PICK_TICKS - 1번 틱까지는 아직 Picking 중이어야 한다");
+
+        state = tick(&state, true);
+        assert!(state.robots[0].carrying, "정확히 PICK_TICKS번째 틱에 화물을 들고 있어야 한다");
         assert_eq!(state.robots[0].task, Task::Idle);
 
         let mut arrived = false;
@@ -831,10 +838,15 @@ mod tests {
         state = tick(&state, true);
         assert_eq!(state.robots[0].task, Task::Placing);
 
-        for _ in 0..PLACE_TICKS {
+        // 마찬가지로 PLACE_TICKS - 1번째 틱까지는 아직 내려놓지 않아야 한다.
+        for _ in 0..PLACE_TICKS - 1 {
             state = tick(&state, true);
         }
-        assert!(!state.robots[0].carrying, "PLACE_TICKS번 틱 후에는 화물을 내려놓아야 한다");
+        assert!(state.robots[0].carrying, "PLACE_TICKS - 1번 틱까지는 아직 화물을 내려놓으면 안 된다");
+        assert_eq!(state.robots[0].task, Task::Placing, "PLACE_TICKS - 1번 틱까지는 아직 Placing 중이어야 한다");
+
+        state = tick(&state, true);
+        assert!(!state.robots[0].carrying, "정확히 PLACE_TICKS번째 틱에 화물을 내려놓아야 한다");
         assert_eq!(state.robots[0].task, Task::Idle);
     }
 
