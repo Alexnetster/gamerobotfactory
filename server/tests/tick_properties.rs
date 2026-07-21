@@ -75,8 +75,8 @@ proptest! {
     /// (원래 서로 달랐던) 자기 칸으로 되돌리므로, N대로 확장해도 충돌이
     /// 없어야 한다는 것이 크레이트의 핵심 주장이다.
     #[test]
-    fn tick_never_produces_collisions(state in arbitrary_sim_state()) {
-        let next = tick(&state);
+    fn tick_never_produces_collisions(state in arbitrary_sim_state(), conveyor_running: bool) {
+        let next = tick(&state, conveyor_running);
 
         let mut seen = HashSet::new();
         for robot in &next.robots {
@@ -88,16 +88,16 @@ proptest! {
     /// 같은 결과 위치들을 내야 한다 (스레드 스케줄링이나 rayon의 병렬 실행
     /// 순서에 영향받지 않는 결정적 타이브레이크 덕분).
     #[test]
-    fn tick_is_deterministic(state in arbitrary_sim_state()) {
-        let positions_a: Vec<CellId> = tick(&state).robots.iter().map(|r| r.pos).collect();
-        let positions_b: Vec<CellId> = tick(&state).robots.iter().map(|r| r.pos).collect();
+    fn tick_is_deterministic(state in arbitrary_sim_state(), conveyor_running: bool) {
+        let positions_a: Vec<CellId> = tick(&state, conveyor_running).robots.iter().map(|r| r.pos).collect();
+        let positions_b: Vec<CellId> = tick(&state, conveyor_running).robots.iter().map(|r| r.pos).collect();
         prop_assert_eq!(positions_a, positions_b);
     }
 
     /// Failed/Repairing 로봇이 섞여 있어도 충돌 방지 불변식이 유지된다.
     #[test]
-    fn tick_never_produces_collisions_with_frozen_robots(state in arbitrary_sim_state_with_some_frozen_robots()) {
-        let next = tick(&state);
+    fn tick_never_produces_collisions_with_frozen_robots(state in arbitrary_sim_state_with_some_frozen_robots(), conveyor_running: bool) {
+        let next = tick(&state, conveyor_running);
 
         let mut seen = HashSet::new();
         for robot in &next.robots {
@@ -108,9 +108,9 @@ proptest! {
     /// Failed/Repairing 로봇이 섞여 있어도(마모/고장 로직이 결정적 해시를
     /// 쓰므로) tick()은 여전히 순수 함수여야 한다.
     #[test]
-    fn tick_is_deterministic_with_frozen_robots(state in arbitrary_sim_state_with_some_frozen_robots()) {
-        let a: Vec<(CellId, RobotStatus)> = tick(&state).robots.iter().map(|r| (r.pos, r.status)).collect();
-        let b: Vec<(CellId, RobotStatus)> = tick(&state).robots.iter().map(|r| (r.pos, r.status)).collect();
+    fn tick_is_deterministic_with_frozen_robots(state in arbitrary_sim_state_with_some_frozen_robots(), conveyor_running: bool) {
+        let a: Vec<(CellId, RobotStatus)> = tick(&state, conveyor_running).robots.iter().map(|r| (r.pos, r.status)).collect();
+        let b: Vec<(CellId, RobotStatus)> = tick(&state, conveyor_running).robots.iter().map(|r| (r.pos, r.status)).collect();
         prop_assert_eq!(a, b);
     }
 
@@ -127,7 +127,7 @@ proptest! {
     /// 작업을 복구 완료 후 잊지 않는다는 설계 의도와 일치), 버그가
     /// 아니라 이 프로퍼티가 적용되는 대상에서 제외해야 할 경우다.
     #[test]
-    fn frozen_robots_never_move(state in arbitrary_sim_state_with_some_frozen_robots()) {
+    fn frozen_robots_never_move(state in arbitrary_sim_state_with_some_frozen_robots(), conveyor_running: bool) {
         let frozen_positions: std::collections::HashMap<u32, CellId> = state
             .robots
             .iter()
@@ -138,7 +138,7 @@ proptest! {
             .map(|r| (r.id, r.pos))
             .collect();
 
-        let next = tick(&state);
+        let next = tick(&state, conveyor_running);
 
         for robot in &next.robots {
             if let Some(&original_pos) = frozen_positions.get(&robot.id) {

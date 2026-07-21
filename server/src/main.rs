@@ -89,8 +89,8 @@ const TICK_INTERVAL: Duration = Duration::from_millis(50); // 20Hz
 /// 검토해야 한다 — `sim_core::sim`의 `safe_call` 주석과 같은 이유.
 /// 의존: 이 크레이트가 `panic = "abort"` 프로파일을 쓰지 않는다는 것 —
 /// 그 경우 `catch_unwind`는 컴파일 경고 없이 조용히 무력화된다.
-fn safe_tick(sim: &SimState) -> Option<SimState> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(sim))) {
+fn safe_tick(sim: &SimState, conveyor_running: bool) -> Option<SimState> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(sim, conveyor_running))) {
         Ok(next) => Some(next),
         Err(_) => {
             tracing::error!("tick() panicked; skipping this tick, simulation state unchanged");
@@ -169,7 +169,7 @@ fn spawn_tick_loop(
             let tick_processing_start = std::time::Instant::now();
             let (message, next_snapshot, should_persist, stats_row, failure_events) = {
                 let mut guard = state.lock().await;
-                match safe_tick(&guard.sim) {
+                match safe_tick(&guard.sim, guard.conveyor.running) {
                     Some(next_sim) => guard.sim = next_sim,
                     None => metrics.tick_panics_total.inc(),
                 }
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn safe_tick_passes_through_normal_ticks_unchanged() {
         let sim = SimState { grid: Arc::new(Grid::new(3, 3)), robots: Vec::new(), tick_count: 5 };
-        let result = safe_tick(&sim);
+        let result = safe_tick(&sim, false);
         assert!(result.is_some());
         assert_eq!(result.unwrap().tick_count, 6);
     }

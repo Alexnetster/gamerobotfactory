@@ -15,6 +15,11 @@ const LEG_CYCLE_SPEED: f32 = 0.1;
 const WEAR_LIMIT_TICKS: u64 = 2000; // 100초 분량의 작업(20Hz 기준) — 튜닝 대상
 const MAX_FAILURE_PROB: f64 = 0.05; // 완전 마모 상태에서의 틱당 최대 고장 확률 — 튜닝 대상
 pub const REPAIR_TICKS: u32 = 100; // 20Hz 기준 5초 — 튜닝 대상. 나중 태스크의 game_state.rs::repair_robot이 RepairRobot 처리 시 이 값을 참조할 예정이라 pub.
+pub const PICK_TICKS: u32 = 20; // 20Hz 기준 약 1초 — 튜닝 대상
+pub const PLACE_TICKS: u32 = 20; // 20Hz 기준 약 1초 — 튜닝 대상
+pub const UNIT_PER_CYCLE: f32 = 1.0; // 배치 1회 완료당 생산량 — main.rs가 참조
+const PICKUP_SEED: u64 = 0;
+const PLACE_SEED: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BodyPose {
@@ -92,6 +97,8 @@ pub struct Robot {
     pub worn_ticks: u64,
     pub status: RobotStatus,
     pub facing: Direction,
+    pub carrying: bool,
+    pub work_ticks_remaining: u32,
 }
 
 impl Robot {
@@ -107,6 +114,8 @@ impl Robot {
             worn_ticks: 0,
             status: RobotStatus::Operational,
             facing: Direction::East,
+            carrying: false,
+            work_ticks_remaining: 0,
         }
     }
 
@@ -184,13 +193,13 @@ struct MoveIntent {
 /// 않고 새 상태를 반환한다. 각 로봇의 계획은 "틱 시작 시점에 얼어붙은
 /// 스냅샷"(`occupied`)만 읽으므로(더블 버퍼링), 병렬로 계산해도 서로의
 /// 계산 중인 결과를 참조하지 않아 데이터 경쟁이 없다.
-pub fn tick(state: &SimState) -> SimState {
+pub fn tick(state: &SimState, conveyor_running: bool) -> SimState {
     let occupied: HashSet<CellId> = state.robots.iter().map(|r| r.pos).collect();
 
     let planned: Vec<Robot> = state
         .robots
         .par_iter()
-        .map(|robot| safe_plan_robot(&state.grid, robot, &occupied, state.tick_count))
+        .map(|robot| safe_plan_robot(&state.grid, robot, &occupied, state.tick_count, conveyor_running))
         .collect();
 
     let intents: Vec<MoveIntent> = state
@@ -254,7 +263,32 @@ fn next_patrol_goal(robot: &Robot, grid: &Grid) -> CellId {
     if robot.goal == a { b } else { a }
 }
 
-fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64) -> Robot {
+/// 작업 사이클의 픽업/배치 지점 — `patrol_points`와 달리 그리드 전체
+/// (`w*h`칸)에 걸쳐 해시로 분산시킨다. `patrol_points`는 x/y를 각각
+/// `id*7 mod w`/`id*3 mod h`로 독립 계산해서 정확히 w(보통 10)대마다
+/// 좌표 쌍이 완전히 겹치는데(주기가 w에 불과), 순찰에서는 스쳐 지나가는
+/// 통과점이라 무해했지만(로봇이 거기 머무르지 않음) 작업 사이클은 이
+/// 지점에서 `PICK_TICKS`/`PLACE_TICKS` 동안 정지하므로 겹치면 다른
+/// 로봇이 훨씬 오래 못 들어갈 수 있다(설계문서 §4). `deterministic_roll`
+/// (마모/고장 판정에 쓰는 것과 같은 순수 해시 함수)을 재사용해 그리드
+/// 전체 칸 하나를 인덱스로 뽑으면 주기가 w*h로 늘어나 충돌 확률이
+/// 크게 줄어든다(완전히 없어지지는 않음 — 잔여 한계는 설계문서 §4 참고,
+/// 의도적으로 받아들인 한계라 재시도 로직은 만들지 않는다).
+fn work_points(id: u32, grid: &Grid) -> (CellId, CellId) {
+    let w = grid.width.max(1);
+    let h = grid.height.max(1);
+    let cell_count = (w * h).max(1);
+    let pickup_idx = (deterministic_roll(id, PICKUP_SEED) * cell_count as f64) as i32 % cell_count;
+    let mut place_idx = (deterministic_roll(id, PLACE_SEED) * cell_count as f64) as i32 % cell_count;
+    if place_idx == pickup_idx {
+        place_idx = (place_idx + 1) % cell_count;
+    }
+    let pickup = (pickup_idx % w, pickup_idx / w);
+    let place = (place_idx % w, place_idx / w);
+    (pickup, place)
+}
+
+fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64, conveyor_running: bool) -> Robot {
     let mut next = update_status(robot.clone(), tick_count);
 
     if next.status != RobotStatus::Operational {
@@ -265,10 +299,54 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count
         return next;
     }
 
-    if next.pos == next.goal {
-        next.goal = next_patrol_goal(&next, grid);
+    if !conveyor_running {
+        // 컨베이어가 꺼져 있으면 작업 사이클을 유지할 이유가 없다 — 진행
+        // 중이던 픽업/배치를 즉시 취소하고 순찰로 되돌아간다.
+        if next.task != Task::Idle || next.carrying || next.work_ticks_remaining > 0 {
+            next.task = Task::Idle;
+            next.carrying = false;
+            next.work_ticks_remaining = 0;
+        }
+        if next.pos == next.goal {
+            next.goal = next_patrol_goal(&next, grid);
+        }
+        return advance_along_path(grid, next, occupied, tick_count);
     }
 
+    if next.work_ticks_remaining > 0 {
+        // 픽업/배치 지점에 이미 도착해 카운트다운 중 — 이동은 하지 않는다.
+        next.task = if next.carrying { Task::Placing } else { Task::Picking };
+        next.work_ticks_remaining -= 1;
+        if next.work_ticks_remaining == 0 {
+            next.carrying = !next.carrying;
+            next.task = Task::Idle;
+        }
+        return next;
+    }
+
+    let (pickup, place) = work_points(next.id, grid);
+    let target = if next.carrying { place } else { pickup };
+
+    if next.pos != target {
+        if next.goal != target {
+            next.goal = target;
+            next.path.clear();
+            next.ticks_until_repath = 0;
+        }
+        next.task = Task::Idle;
+        return advance_along_path(grid, next, occupied, tick_count);
+    }
+
+    next.goal = target;
+    next.task = if next.carrying { Task::Placing } else { Task::Picking };
+    next.work_ticks_remaining = if next.carrying { PLACE_TICKS } else { PICK_TICKS };
+    next
+}
+
+/// 목표(`next.goal`)를 향해 경로를 찾고 한 칸 이동을 시도한다 — 순찰과
+/// 작업 사이클 모두 "그리드 위에서 목표까지 걸어간다"는 점은 같고
+/// 목표를 무엇으로 삼을지만 다르므로, 이 로직은 공유한다.
+fn advance_along_path(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, tick_count: u64) -> Robot {
     if next.path.is_empty() || next.ticks_until_repath == 0 {
         let mut blocked = occupied.clone();
         blocked.remove(&next.pos);
@@ -304,8 +382,8 @@ fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count
 
 /// `plan_robot`을 패닉으로부터 격리한다. 패닉이 나면 해당 로봇은 이번
 /// 틱을 그대로 멈춘 채 넘어가고, 나머지 로봇들의 갱신은 영향받지 않는다.
-fn safe_plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64) -> Robot {
-    safe_call(robot, || plan_robot(grid, robot, occupied, tick_count))
+fn safe_plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64, conveyor_running: bool) -> Robot {
+    safe_call(robot, || plan_robot(grid, robot, occupied, tick_count, conveyor_running))
 }
 
 /// Runs `f` (a robot's per-tick update) isolated from panics: if it
@@ -370,7 +448,7 @@ mod tests {
         state.robots.push(Robot::new(1, (0, 0), (3, 0)));
         state.tick_count = 1; // 1 % PATROL_MOVE_INTERVAL_TICKS(3) != 0
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         assert_eq!(next.robots[0].pos, (0, 0), "이동 지연 주기가 아닌 틱에는 움직이지 않아야 한다");
     }
@@ -381,7 +459,7 @@ mod tests {
         state.robots.push(Robot::new(1, (0, 0), (3, 0)));
         state.tick_count = PATROL_MOVE_INTERVAL_TICKS; // 3 % 3 == 0
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         assert_eq!(next.robots[0].pos, (1, 0), "이동 지연 주기가 돌아온 틱에는 정상적으로 한 칸 이동해야 한다");
     }
@@ -391,7 +469,7 @@ mod tests {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (0, 0), (3, 0)));
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         // tick_count=0은 항상 이동 지연 주기의 배수(0 % N == 0)라 첫 이동은
         // 지연과 무관하게 즉시 일어난다.
@@ -404,7 +482,7 @@ mod tests {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (2, 0), (2, 0)));
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         assert_ne!(next.robots[0].goal, (2, 0), "arriving at a patrol point should immediately assign the next one");
         assert_eq!(next.robots[0].pos, (3, 0), "the robot should already be moving toward the new patrol goal");
@@ -418,7 +496,7 @@ mod tests {
         state.robots.push(Robot::new(1, (0, 0), (2, 0)));
         state.robots.push(Robot::new(2, (2, 0), (0, 0)));
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         let r1 = next.robots.iter().find(|r| r.id == 1).unwrap();
         let r2 = next.robots.iter().find(|r| r.id == 2).unwrap();
@@ -432,8 +510,8 @@ mod tests {
         state.robots.push(Robot::new(1, (0, 0), (2, 0)));
         state.robots.push(Robot::new(2, (2, 0), (0, 0)));
 
-        let positions_a: Vec<CellId> = tick(&tick(&state)).robots.iter().map(|r| r.pos).collect();
-        let positions_b: Vec<CellId> = tick(&tick(&state)).robots.iter().map(|r| r.pos).collect();
+        let positions_a: Vec<CellId> = tick(&tick(&state, false), false).robots.iter().map(|r| r.pos).collect();
+        let positions_b: Vec<CellId> = tick(&tick(&state, false), false).robots.iter().map(|r| r.pos).collect();
         assert_eq!(positions_a, positions_b);
     }
 
@@ -454,7 +532,7 @@ mod tests {
         state.robots.push(Robot::new(1, (0, 0), (3, 0)));
         state.robots.push(Robot::new(2, (4, 0), (4, 0)));
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         let healthy = next.robots.iter().find(|r| r.id == 1).unwrap();
         assert_eq!(healthy.pos, (1, 0));
@@ -465,7 +543,7 @@ mod tests {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (0, 0), (3, 0)));
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         assert!(next.robots[0].leg_cycle_progress > 0.0);
     }
@@ -475,7 +553,7 @@ mod tests {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (2, 0), (2, 0)));
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         assert!(next.robots[0].leg_cycle_progress > 0.0, "moving toward the new patrol goal should advance the gait cycle");
     }
@@ -567,7 +645,7 @@ mod tests {
         robot.status = RobotStatus::Failed;
         state.robots.push(robot);
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         assert_eq!(next.robots[0].pos, (0, 0), "a Failed robot must not move");
     }
@@ -589,7 +667,7 @@ mod tests {
         state.robots.push(mover);
 
         for _ in 0..10 {
-            state = tick(&state);
+            state = tick(&state, false);
             let blocker_after = state.robots.iter().find(|r| r.id == 1).unwrap();
             let mover_after = state.robots.iter().find(|r| r.id == 2).unwrap();
             assert_eq!(blocker_after.pos, (1, 0), "a Failed robot must never move, even toward its own unreached goal");
@@ -605,10 +683,10 @@ mod tests {
         robot.worn_ticks = 500;
         state.robots.push(robot);
 
-        let after_one = tick(&state);
+        let after_one = tick(&state, false);
         assert_eq!(after_one.robots[0].status, RobotStatus::Repairing { remaining_ticks: 1 });
 
-        let after_two = tick(&after_one);
+        let after_two = tick(&after_one, false);
         assert_eq!(after_two.robots[0].status, RobotStatus::Operational);
         assert_eq!(after_two.robots[0].worn_ticks, 0, "worn_ticks should reset to 0 once repair completes");
     }
@@ -637,7 +715,7 @@ mod tests {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (0, 0), (3, 0)));
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         assert_eq!(next.robots[0].facing, Direction::East);
     }
@@ -652,7 +730,7 @@ mod tests {
         state.robots.push(Robot::new(1, (0, 0), (2, 0)));
         state.robots.push(Robot::new(2, (2, 0), (0, 0)));
 
-        let next = tick(&state);
+        let next = tick(&state, false);
 
         let r2 = next.robots.iter().find(|r| r.id == 2).unwrap();
         assert_eq!(r2.pos, (2, 0), "진 로봇은 제자리에 남아야 한다(기존 불변식)");
@@ -663,7 +741,7 @@ mod tests {
     fn facing_holds_last_direction_while_stationary() {
         let mut state = simple_state(5, 1);
         state.robots.push(Robot::new(1, (0, 0), (3, 0)));
-        state = tick(&state); // 동쪽으로 한 칸 이동 -> facing = East
+        state = tick(&state, false); // 동쪽으로 한 칸 이동 -> facing = East
         assert_eq!(state.robots[0].facing, Direction::East);
 
         // 목표를 직접 바꿀 때는 남아 있는 경로/재계획 타이머도 함께 지워야 한다
@@ -679,7 +757,7 @@ mod tests {
         // 주기만큼 반복해서 실제로 한 걸음 내딛을 때까지 돌린다 —
         // 비둘기집 원리로 이 횟수 안에는 반드시 이동 허용 틱이 낀다.
         for _ in 0..PATROL_MOVE_INTERVAL_TICKS {
-            state = tick(&state);
+            state = tick(&state, false);
         }
         assert_eq!(state.robots[0].pos, (0, 0), "그 사이 실제로 서쪽으로 한 칸 이동해 있어야 한다");
         assert_eq!(state.robots[0].facing, Direction::West);
@@ -690,7 +768,7 @@ mod tests {
         // 만든다 — plan_robot()이 이동/재계획/순찰 재배정을 전부 건너뛴다.
         state.robots[0].status = RobotStatus::Failed;
         for _ in 0..PATROL_MOVE_INTERVAL_TICKS {
-            state = tick(&state);
+            state = tick(&state, false);
         }
         assert_eq!(state.robots[0].facing, Direction::West);
     }
@@ -713,5 +791,82 @@ mod tests {
         assert_eq!(next_patrol_goal(&robot, &grid), b);
         robot.goal = b;
         assert_eq!(next_patrol_goal(&robot, &grid), a);
+    }
+
+    #[test]
+    fn work_points_are_always_distinct_for_a_reasonably_sized_grid() {
+        let grid = Grid::new(10, 10);
+        for id in 0..50u32 {
+            let (a, b) = work_points(id, &grid);
+            assert_ne!(a, b, "work points must differ for id {id}");
+        }
+    }
+
+    #[test]
+    fn full_work_cycle_moves_to_pickup_picks_up_carries_and_places() {
+        let grid = Arc::new(Grid::new(10, 10));
+        let (pickup, place) = work_points(7, &grid);
+        let mut state = SimState { grid: grid.clone(), robots: vec![Robot::new(7, pickup, pickup)], tick_count: 0 };
+
+        state = tick(&state, true);
+        assert_eq!(state.robots[0].task, Task::Picking);
+        assert!(!state.robots[0].carrying);
+
+        for _ in 0..PICK_TICKS {
+            state = tick(&state, true);
+        }
+        assert!(state.robots[0].carrying, "PICK_TICKS번 틱이 지나면 화물을 들고 있어야 한다");
+        assert_eq!(state.robots[0].task, Task::Idle);
+
+        let mut arrived = false;
+        for _ in 0..500 {
+            state = tick(&state, true);
+            if state.robots[0].pos == place {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "carrying 로봇은 결국 배치 지점에 도착해야 한다");
+
+        state = tick(&state, true);
+        assert_eq!(state.robots[0].task, Task::Placing);
+
+        for _ in 0..PLACE_TICKS {
+            state = tick(&state, true);
+        }
+        assert!(!state.robots[0].carrying, "PLACE_TICKS번 틱 후에는 화물을 내려놓아야 한다");
+        assert_eq!(state.robots[0].task, Task::Idle);
+    }
+
+    #[test]
+    fn turning_conveyor_off_mid_work_resets_task_and_carrying_immediately() {
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        robot.task = Task::Picking;
+        robot.work_ticks_remaining = 5;
+        robot.carrying = true;
+        let grid = Grid::new(5, 5);
+        let occupied: HashSet<CellId> = HashSet::new();
+
+        let next = plan_robot(&grid, &robot, &occupied, 0, false);
+
+        assert_eq!(next.task, Task::Idle);
+        assert!(!next.carrying);
+        assert_eq!(next.work_ticks_remaining, 0);
+    }
+
+    #[test]
+    fn manual_trigger_arm_action_cannot_skip_the_work_cycle_wait() {
+        let grid = Grid::new(10, 10);
+        let (pickup, _place) = work_points(1, &grid);
+        let mut robot = Robot::new(1, (0, 0), (0, 0));
+        robot.task = Task::Picking; // 오퍼레이터가 수동으로 끼워넣은 값
+
+        let occupied: HashSet<CellId> = HashSet::new();
+        let next = plan_robot(&grid, &robot, &occupied, 0, true);
+
+        assert!(!next.carrying, "manually-set Picking task must not instantly complete without the auto cycle's own countdown");
+        if next.pos != pickup {
+            assert_eq!(next.task, Task::Idle, "auto cycle should overwrite the manual task while still transiting to the pickup point");
+        }
     }
 }
