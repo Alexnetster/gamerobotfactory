@@ -14,6 +14,7 @@ function robot(id: number, x: number): RobotView {
     path: [],
     facing: 'East',
     arm_pose: { shoulder_angle: 0, elbow_angle: 0 },
+    carrying: false,
   }
 }
 

@@ -304,6 +304,16 @@ function drawRobot(ctx: CanvasRenderingContext2D, robot: InterpolatedRobot, sele
   ctx.lineTo(shoulderX + wristDx, shoulderY + wristDy)
   ctx.stroke()
 
+  if (robot.carrying) {
+    const cargoX = shoulderX + wristDx
+    const cargoY = shoulderY + wristDy
+    ctx.fillStyle = '#c9762f'
+    ctx.strokeStyle = '#1c2024'
+    ctx.lineWidth = 1.5
+    ctx.fillRect(cargoX - 5, cargoY - 5, 10, 9)
+    ctx.strokeRect(cargoX - 5, cargoY - 5, 10, 9)
+  }
+
   ctx.restore()
 }
 

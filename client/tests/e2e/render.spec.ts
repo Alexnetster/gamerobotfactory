@@ -316,4 +316,36 @@ test.describe('client renders against a real server', () => {
       ws.close()
     }
   })
+
+  test('renders a cargo icon on a robot after it completes a pickup', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 700 })
+    await page.goto(`/?ws=ws://127.0.0.1:${backendPort()}/ws`)
+
+    const before = await currentRobotCount(page)
+    const incButton = page.locator('.sidebar button', { hasText: '+' })
+    await incButton.click()
+    await expect(page.locator('.robot-count')).toHaveText(String(before + 1), { timeout: 5000 })
+
+    // 컨베이어는 서버 기본값으로 이미 켜져 있다 — 작업 사이클이 자동으로
+    // 시작돼 픽업을 완료하면 화물을 든다. 이동 거리 + PICK_TICKS(20틱,
+    // 약 1초) 감안해 8초 동안 재시도.
+    const cargoColor = { r: 0xc9, g: 0x76, b: 0x2f }
+    let found = false
+    for (let attempt = 0; attempt < 40 && !found; attempt++) {
+      found = await page.evaluate((color) => {
+        const c = document.querySelector('canvas') as HTMLCanvasElement
+        const ctx = c.getContext('2d')!
+        const { width, height } = c
+        const data = ctx.getImageData(0, 0, width, height).data
+        for (let i = 0; i < data.length; i += 4) {
+          if (Math.abs(data[i] - color.r) < 10 && Math.abs(data[i + 1] - color.g) < 10 && Math.abs(data[i + 2] - color.b) < 10) {
+            return true
+          }
+        }
+        return false
+      }, cargoColor)
+      if (!found) await page.waitForTimeout(200)
+    }
+    expect(found).toBe(true)
+  })
 })

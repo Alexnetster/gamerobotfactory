@@ -16,6 +16,7 @@ function robot(overrides: Partial<RobotView> = {}): RobotView {
     path: [],
     facing: 'East',
     arm_pose: { shoulder_angle: 0, elbow_angle: 0 },
+    carrying: false,
     ...overrides,
   }
 }

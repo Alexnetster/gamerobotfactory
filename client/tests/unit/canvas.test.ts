@@ -15,6 +15,7 @@ function robotAt(id: number, x: number, y: number): InterpolatedRobot {
     path: [],
     facing: 'East',
     arm_pose: { shoulder_angle: 0, elbow_angle: 0 },
+    carrying: false,
   }
 }
 

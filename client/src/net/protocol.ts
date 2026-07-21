@@ -34,6 +34,7 @@ export interface RobotView {
   path: WireCellId[]
   facing: WireDirection
   arm_pose: WireArmPose
+  carrying: boolean
 }
 
 export interface ConveyorView {
