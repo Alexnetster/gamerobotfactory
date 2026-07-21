@@ -276,9 +276,10 @@ mod tests {
     fn robot_view_quantizes_durability_to_the_nearest_five_percent() {
         use sim_core::sim::Robot;
         let mut robot = Robot::new(1, (0, 0), (0, 0));
-        // wear_ratio = 1100/2000 = 0.55 -> raw durability_remaining 0.45,
+        // wear_ratio = 3300/6000 = 0.55 -> raw durability_remaining 0.45,
         // 이미 5%의 배수라 반올림 여부와 무관하게 정확히 0.45가 나와야 한다.
-        robot.worn_ticks = 1100;
+        // (WEAR_LIMIT_TICKS가 2000->6000으로 튜닝되면서 3300으로 갱신됨.)
+        robot.worn_ticks = 3300;
 
         let view = RobotView::from(&robot);
 

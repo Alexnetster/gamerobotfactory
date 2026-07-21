@@ -12,8 +12,14 @@ const REPATH_INTERVAL: u32 = 10;
 // "한 걸음 걷고 잠깐 멈춤"의 리듬이 된다. 튜닝 대상.
 const PATROL_MOVE_INTERVAL_TICKS: u64 = 3;
 const LEG_CYCLE_SPEED: f32 = 0.1;
-const WEAR_LIMIT_TICKS: u64 = 2000; // 100초 분량의 작업(20Hz 기준) — 튜닝 대상
-const MAX_FAILURE_PROB: f64 = 0.05; // 완전 마모 상태에서의 틱당 최대 고장 확률 — 튜닝 대상
+// 300초(5분) 분량의 작업(20Hz 기준) — 튜닝 대상. 원래 2000(100초)이었으나
+// 실사용 피드백("고장이 너무 빨리 난다")으로 완화함: 로봇 여러 대가 각자
+// 사이클(픽업+배치 40틱)을 반복하면 예전 값으로는 1~2분 안에 여러 대가
+// 동시에 고장나 데모하기엔 너무 잦았다.
+const WEAR_LIMIT_TICKS: u64 = 6000;
+// 완전 마모 상태에서의 틱당 최대 고장 확률 — 튜닝 대상. 위와 같은 이유로
+// 0.05(5%)에서 낮춤.
+const MAX_FAILURE_PROB: f64 = 0.02;
 pub const REPAIR_TICKS: u32 = 100; // 20Hz 기준 5초 — 튜닝 대상. 나중 태스크의 game_state.rs::repair_robot이 RepairRobot 처리 시 이 값을 참조할 예정이라 pub.
 pub const PICK_TICKS: u32 = 20; // 20Hz 기준 약 1초 — 튜닝 대상
 pub const PLACE_TICKS: u32 = 20; // 20Hz 기준 약 1초 — 튜닝 대상
@@ -131,7 +137,7 @@ impl Robot {
 
 /// (robot_id, tick_count)를 섞어 대략 [0.0, 1.0] 구간의 결정적 의사난수를
 /// 낸다(u64 -> f64 변환의 부동소수점 반올림으로 극히 드물게 정확히 1.0이
-/// 나올 수 있음 — `failure_prob`가 최대 `MAX_FAILURE_PROB`=0.05를 넘지
+/// 나올 수 있음 — `failure_prob`가 최대 `MAX_FAILURE_PROB`를 넘지
 /// 않으므로 그 경우도 그냥 "고장 아님"으로 정확히 처리되어 문제없다).
 /// splitmix64 파이널라이저를 재사용 — 암호학적 강도는 필요 없고, 입력이
 /// 조금만 달라져도 출력이 크게 달라지는 성질(avalanche)만 있으면 된다.
@@ -619,10 +625,13 @@ mod tests {
     #[test]
     fn fully_worn_robot_fails_at_roughly_max_failure_prob_rate() {
         // worn_ticks를 한계치로 박아두면 wear_ratio()==1.0,
-        // failure_prob==MAX_FAILURE_PROB(0.05)로 고정된다 — 여러
-        // tick_count에 대해 update_status를 반복 호출해 실제로 그 비율
-        // 근처로 고장이 발생하는지 통계적으로 확인한다(정확히 5%일
-        // 필요는 없고 자릿수만 맞으면 됨 — 결정적 해시라 매번 같은 결과).
+        // failure_prob==MAX_FAILURE_PROB로 고정된다 — 여러 tick_count에
+        // 대해 update_status를 반복 호출해 실제로 그 비율 근처로 고장이
+        // 발생하는지 통계적으로 확인한다(정확히 일치할 필요는 없고
+        // 자릿수만 맞으면 됨 — 결정적 해시라 매번 같은 결과). 기대 범위를
+        // `MAX_FAILURE_PROB`에서 직접 계산해서, 이 상수를 나중에 다시
+        // 튜닝해도(실제로 한 번 0.05->0.02로 바뀐 적 있음) 이 테스트가
+        // 낡은 하드코딩 값 때문에 깨지지 않게 한다.
         let mut failures = 0u32;
         let samples = 20_000u64;
         for tick in 0..samples {
@@ -635,7 +644,8 @@ mod tests {
             }
         }
         let rate = failures as f64 / samples as f64;
-        assert!((0.03..0.07).contains(&rate), "expected a failure rate near 0.05, got {rate}");
+        let expected_range = (MAX_FAILURE_PROB * 0.5)..(MAX_FAILURE_PROB * 1.5);
+        assert!(expected_range.contains(&rate), "expected a failure rate near {MAX_FAILURE_PROB}, got {rate}");
     }
 
     #[test]

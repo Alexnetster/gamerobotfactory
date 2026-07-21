@@ -285,7 +285,7 @@ async fn robot_failures_endpoint_returns_an_empty_list_when_nothing_has_failed()
 #[tokio::test]
 async fn robot_failures_endpoint_returns_previously_persisted_failure_events() {
     // Waiting for a *real* failure to occur organically (natural wear takes
-    // 2000 ticks = 100s at 20Hz, plus a probabilistic delay on top) is
+    // WEAR_LIMIT_TICKS at 20Hz, plus a probabilistic delay on top) is
     // exactly the flaky/slow pattern this project avoids. Instead, pre-seed
     // the isolated SQLite file directly with a known row before the server
     // (and its tick loop) ever starts, then prove the real REST-read path —
@@ -353,7 +353,7 @@ async fn metrics_endpoint_exposes_robot_failure_gauges_at_their_baseline() {
     let response = client.get(format!("{base}/metrics")).send().await.expect("GET /metrics failed");
     let body = response.text().await.expect("failed to read metrics body");
 
-    // 실제로 고장이 발생하는 걸 기다리는 건(자연 마모로 2000틱=100초 +
+    // 실제로 고장이 발생하는 걸 기다리는 건(자연 마모로 WEAR_LIMIT_TICKS +
     // 확률적 지연) 이 테스트를 느리고 취약하게 만든다 — 대신 두 지표가
     // 노출되고 있고, 짧은 실행 동안 고장이 없었다는 정상적인 기저값(0)을
     // 보이는지만 확인한다. 값이 실제로 바뀌는 로직(detect_status_transitions)
