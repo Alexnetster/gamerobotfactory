@@ -260,9 +260,9 @@ async fn carrying_flag_flows_over_the_wire_during_a_work_cycle() {
     // 스폰 지점(0,0)이 work_points(0, ..)의 픽업 지점과 우연히 일치해서
     // (deterministic_roll(0, ..)이 항상 0을 내므로) 이 테스트는 실제로는
     // 이동 없이 곧바로 PICK_TICKS(20틱, 20Hz 기준 약 1초)만 기다린다 —
-    // 그래도 데드라인은 10x10 그리드 최악의 이동 거리(대각선 최대 18칸,
-    // ~54틱)까지 감안해 넉넉히 8초로 잡는다(다른 id로 바뀌거나 그리드
-    // 크기가 바뀌어도 안전하게 통과하도록).
+    // 그래도 데드라인은 실제 그리드(9x7) 최악의 이동 거리(대각선 최대
+    // (9-1)+(7-1)=14칸, ~42틱)까지 감안해 넉넉히 8초로 잡는다(다른 id로
+    // 바뀌거나 그리드 크기가 바뀌어도 안전하게 통과하도록).
     let saw_carrying_true = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let Some(Ok(Message::Text(text))) = read.next().await else { return false };

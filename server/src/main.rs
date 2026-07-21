@@ -75,7 +75,15 @@ async fn robot_failures(Extension(db): Extension<DbHandle>) -> impl IntoResponse
 }
 
 fn initial_state() -> SharedState {
-    let sim = SimState { grid: Arc::new(Grid::new(10, 10)), robots: Vec::new(), tick_count: 0 };
+    // 9x7 — client/src/main.ts::GRID_SIZE와 정확히 같은 크기로 맞춘다.
+    // 예전엔 여기가 10x10이었는데, 클라이언트는 항상 자기 나름의 9x7
+    // 바닥만 그렸다(둘이 서로의 존재를 몰라 우연히 따로 정해진 값이었음)
+    // — 즉 로봇이 시각적으로 그려지지 않는 칸(x=9 또는 y=7,8,9)까지도
+    // 갈 수 있었던 잠재적 버그였다. 이제 그리드 크기가 실제로 일치하고,
+    // sim_core::sim::work_points가 컨베이어 벨트 칸으로 픽업/배치
+    // 지점을 고르므로(설계 결정: 벨트와 무관한 허공에서 화물이 나타났다
+    // 사라진다는 실사용 피드백) 클라이언트가 그리는 벨트와도 일치한다.
+    let sim = SimState { grid: Arc::new(Grid::new(9, 7)), robots: Vec::new(), tick_count: 0 };
     Arc::new(Mutex::new(GameState::new(sim)))
 }
 

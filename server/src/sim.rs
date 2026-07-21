@@ -276,22 +276,34 @@ fn next_patrol_goal(robot: &Robot, grid: &Grid) -> CellId {
 /// 통과점이라 무해했지만(로봇이 거기 머무르지 않음) 작업 사이클은 이
 /// 지점에서 `PICK_TICKS`/`PLACE_TICKS` 동안 정지하므로 겹치면 다른
 /// 로봇이 훨씬 오래 못 들어갈 수 있다(설계문서 §4). `deterministic_roll`
-/// (마모/고장 판정에 쓰는 것과 같은 순수 해시 함수)을 재사용해 그리드
-/// 전체 칸 하나를 인덱스로 뽑으면 주기가 w*h로 늘어나 충돌 확률이
+/// (마모/고장 판정에 쓰는 것과 같은 순수 해시 함수)을 재사용해 벨트 칸
+/// 하나를 인덱스로 뽑으면 주기가 벨트 칸 수만큼 늘어나 충돌 확률이
 /// 크게 줄어든다(완전히 없어지지는 않음 — 잔여 한계는 설계문서 §4 참고,
 /// 의도적으로 받아들인 한계라 재시도 로직은 만들지 않는다).
+///
+/// 픽업/배치 지점은 그리드 아무 칸이나가 아니라 반드시 컨베이어 벨트
+/// 칸(`belt_cells`) 중에서 고른다 — 원래는 그리드 전체에서 골랐으나,
+/// 그러면 "컨베이어는 돌아가는데 화물은 그것과 무관한 허공에서 갑자기
+/// 나타났다 사라진다"는 실사용 피드백으로 바꿨다.
 fn work_points(id: u32, grid: &Grid) -> (CellId, CellId) {
-    let w = grid.width.max(1);
-    let h = grid.height.max(1);
-    let cell_count = (w * h).max(1);
-    let pickup_idx = (deterministic_roll(id, PICKUP_SEED) * cell_count as f64) as i32 % cell_count;
-    let mut place_idx = (deterministic_roll(id, PLACE_SEED) * cell_count as f64) as i32 % cell_count;
+    let cells = belt_cells(grid);
+    let cell_count = cells.len().max(1);
+    let pickup_idx = (deterministic_roll(id, PICKUP_SEED) * cell_count as f64) as usize % cell_count;
+    let mut place_idx = (deterministic_roll(id, PLACE_SEED) * cell_count as f64) as usize % cell_count;
     if place_idx == pickup_idx {
         place_idx = (place_idx + 1) % cell_count;
     }
-    let pickup = (pickup_idx % w, pickup_idx / w);
-    let place = (place_idx % w, place_idx / w);
-    (pickup, place)
+    (cells[pickup_idx], cells[place_idx])
+}
+
+/// 컨베이어 벨트가 차지하는 칸 — 위/왼쪽/아래쪽 세 변, 오른쪽(사이드바
+/// 쪽) 개방인 U자 모양. `client/src/render/canvas.ts::isConveyorCell`과
+/// 정확히 같은 정의를 서버에도 둬서, 클라이언트가 장식으로 그리는 벨트와
+/// 서버가 실제로 작업 지점으로 쓰는 칸이 일치하게 한다.
+fn belt_cells(grid: &Grid) -> Vec<CellId> {
+    let w = grid.width.max(1);
+    let h = grid.height.max(1);
+    (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| y == 0 || y == h - 1 || x == 0).collect()
 }
 
 fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64, conveyor_running: bool) -> Robot {
@@ -810,6 +822,38 @@ mod tests {
             let (a, b) = work_points(id, &grid);
             assert_ne!(a, b, "work points must differ for id {id}");
         }
+    }
+
+    #[test]
+    fn work_points_always_land_on_a_conveyor_belt_cell() {
+        // 화물이 벨트와 무관한 허공에서 나타났다 사라지는 것처럼 보인다는
+        // 실사용 피드백으로 추가된 제약 — 픽업/배치 지점 둘 다 반드시
+        // 벨트 칸에 속해야 한다. `belt_cells()`를 재사용해 판정하면
+        // `belt_cells()` 자체가 잘못돼도(예: 필터를 실수로 지워 그리드
+        // 전체를 반환하게 됨) 이 테스트가 그 실수를 그대로 베껴서
+        // 통과해버리는 공허한 테스트가 된다(실제로 뮤테이션 테스트로
+        // 확인함) — 그래서 벨트 정의를 여기 독립적으로 다시 써서 판정한다.
+        let grid = Grid::new(9, 7);
+        let (w, h) = (grid.width, grid.height);
+        let is_belt = |(x, y): CellId| y == 0 || y == h - 1 || x == 0;
+        assert!(!is_belt((w / 2, h / 2)), "sanity check: grid center must not itself be a belt cell");
+        for id in 0..50u32 {
+            let (pickup, place) = work_points(id, &grid);
+            assert!(is_belt(pickup), "pickup point {pickup:?} for id {id} is not on the belt");
+            assert!(is_belt(place), "place point {place:?} for id {id} is not on the belt");
+        }
+    }
+
+    #[test]
+    fn belt_cells_form_a_u_shape_open_on_the_right() {
+        let grid = Grid::new(9, 7);
+        let cells = belt_cells(&grid);
+        assert!(cells.contains(&(0, 0)), "top-left corner should be on the belt");
+        assert!(cells.contains(&(8, 0)), "top row should be on the belt");
+        assert!(cells.contains(&(0, 6)), "left column should be on the belt");
+        assert!(cells.contains(&(8, 6)), "bottom row should be on the belt");
+        assert!(!cells.contains(&(8, 3)), "the right side must stay open (not part of the belt)");
+        assert!(!cells.contains(&(4, 3)), "the interior floor must not be part of the belt");
     }
 
     #[test]
