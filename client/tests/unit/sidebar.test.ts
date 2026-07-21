@@ -87,6 +87,49 @@ describe('Sidebar', () => {
     expect(onRepair).toHaveBeenCalledOnce()
   })
 
+  it('does not recreate the selected-panel DOM when nothing displayed actually changed (real per-tick position/gait updates should not drop an in-progress click)', () => {
+    const container = document.createElement('div')
+    const sidebar = makeSidebar(container)
+
+    sidebar.update({
+      connection: { kind: 'open' }, conveyor: { running: true }, robotCount: 1,
+      selectedRobot: robot({ status: { kind: 'Failed' }, pos: { x: 0, y: 0 } }), pathDebugEnabled: false,
+    })
+    const repairButtonBefore = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '수리') as HTMLButtonElement
+
+    // 서버 델타는 20Hz로 계속 오지만, 로봇의 실제 위치(pos)만 바뀌고
+    // 패널에 보이는 값(status/task/durability_remaining)은 그대로인
+    // 경우가 훨씬 흔하다 — 이럴 때도 패널을 다시 그리면 사람이 누르는
+    // 도중인 버튼이 사라질 수 있다.
+    sidebar.update({
+      connection: { kind: 'open' }, conveyor: { running: true }, robotCount: 1,
+      selectedRobot: robot({ status: { kind: 'Failed' }, pos: { x: 1, y: 0 } }), pathDebugEnabled: false,
+    })
+    const repairButtonAfter = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '수리') as HTMLButtonElement
+
+    expect(repairButtonAfter).toBe(repairButtonBefore)
+  })
+
+  it('does recreate the selected-panel DOM when the displayed status actually changes', () => {
+    const container = document.createElement('div')
+    const sidebar = makeSidebar(container)
+
+    sidebar.update({
+      connection: { kind: 'open' }, conveyor: { running: true }, robotCount: 1,
+      selectedRobot: robot({ status: { kind: 'Failed' } }), pathDebugEnabled: false,
+    })
+    const repairButtonWhileFailed = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '수리') as HTMLButtonElement
+    expect(repairButtonWhileFailed.disabled).toBe(false)
+
+    sidebar.update({
+      connection: { kind: 'open' }, conveyor: { running: true }, robotCount: 1,
+      selectedRobot: robot({ status: { kind: 'Repairing', remaining_ticks: 99 } }), pathDebugEnabled: false,
+    })
+    expect(container.textContent).toContain('Repairing (99)')
+    const repairButtonWhileRepairing = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '수리') as HTMLButtonElement
+    expect(repairButtonWhileRepairing.disabled).toBe(true)
+  })
+
   it('shows the reconnecting attempt count', () => {
     const container = document.createElement('div')
     const sidebar = makeSidebar(container)

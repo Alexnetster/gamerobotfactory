@@ -187,6 +187,15 @@ const LEG_BODY_OVERLAP = 4
 const LEG_COLOR = '#454c54'
 const SHOULDER_BLOCK_SIZE = 6
 
+/** 센서 눈 색 — 로봇 상태(status)가 task보다 우선한다. 고장/수리 중인
+ * 로봇도 Idle 로봇과 똑같이 멈춰 있어서, "멈춰있음"만으로는 실제로
+ * 구분이 안 됐다(라이브 데모 실사용 피드백으로 발견). */
+export function sensorEyeColor(robot: Pick<InterpolatedRobot, 'status' | 'task'>): string {
+  if (robot.status.kind === 'Failed') return '#e04b3f'
+  if (robot.status.kind === 'Repairing') return '#4bc0e0'
+  return robot.task === 'Idle' ? '#8a8f96' : '#ffd23a'
+}
+
 function drawRobot(ctx: CanvasRenderingContext2D, robot: InterpolatedRobot, selected: boolean): void {
   const screen = gridToScreen(robot.renderPos.x, robot.renderPos.y)
   const armPoseInput = {
@@ -269,15 +278,37 @@ function drawRobot(ctx: CanvasRenderingContext2D, robot: InterpolatedRobot, sele
     ctx.strokeRect(-BODY_WIDTH / 2, bodyTopY, BODY_WIDTH, BODY_HEIGHT)
   }
 
-  // 센서 헤드 — 눈 색으로 "지금 팔이 작업 중인가"만 나타낸다(로봇의
-  // Failed/Repairing 여부는 이미 정지 여부로 구분되므로 여기서는 안 다룸
-  // — 설계문서 §5).
+  // 센서 헤드 — 눈 색으로 로봇 상태를 나타낸다. 고장(Failed)/수리 중
+  // (Repairing)은 "멈춰있다"는 사실만으로 구분하려 했으나(설계문서 §5),
+  // Idle(작업 없이 대기 중)도 똑같이 멈춰 있어서 실제로는 구분이 안
+  // 됐다 — 사용자가 라이브 데모에서 실측으로 지적해 우선순위를
+  // status > task로 바꿨다: 고장은 빨강, 수리 중은 하늘색, 그 외엔
+  // 기존 작업중/대기 로직 그대로.
   ctx.fillStyle = '#3a4048'
   ctx.fillRect(-6, bodyTopY - 2, 12, 7)
-  ctx.fillStyle = robot.task === 'Idle' ? '#8a8f96' : '#ffd23a'
+  ctx.fillStyle = sensorEyeColor(robot)
   ctx.beginPath()
   ctx.arc(0, bodyTopY + 1.5, 2.5, 0, Math.PI * 2)
   ctx.fill()
+
+  // 고장 상태는 눈 색만으로는 눈에 잘 안 띄어서(작은 점 색 하나 차이),
+  // 몸통 위에 빨간 경고 삼각형(느낌표)을 따로 그려 확실히 구분되게 한다.
+  if (robot.status.kind === 'Failed') {
+    const warnY = bodyTopY - 10
+    ctx.fillStyle = '#e04b3f'
+    ctx.beginPath()
+    ctx.moveTo(0, warnY - 6)
+    ctx.lineTo(5, warnY + 4)
+    ctx.lineTo(-5, warnY + 4)
+    ctx.closePath()
+    ctx.fill()
+    ctx.strokeStyle = '#1c2024'
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(-0.75, warnY - 3, 1.5, 4)
+    ctx.fillRect(-0.75, warnY + 2, 1.5, 1.5)
+  }
 
   // 어깨 장착 블록 + 팔 — 어깨→팔꿈치→손목을 하나의 stroke path로 이어서
   // (다리와 같은 이유로) 이음매 없이 매끈하게 굽어 보이게 한다. 실제 서버

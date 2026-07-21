@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isConveyorCell, sortRobotsForDrawing, conveyorFlowDirection } from '../../src/render/canvas'
+import { isConveyorCell, sortRobotsForDrawing, conveyorFlowDirection, sensorEyeColor } from '../../src/render/canvas'
 import type { InterpolatedRobot } from '../../src/state/interpolation'
 
 function robotAt(id: number, x: number, y: number): InterpolatedRobot {
@@ -59,6 +59,26 @@ describe('conveyorFlowDirection', () => {
     expect(conveyorFlowDirection(grid, 0, 0)).toEqual({ dx: 0, dy: 1 })
     // (0, height-1): 왼쪽 변과 아래쪽 변이 만나는 모서리 — 아래쪽 변 방향(오른쪽)을 따른다.
     expect(conveyorFlowDirection(grid, 0, 5)).toEqual({ dx: 1, dy: 0 })
+  })
+})
+
+describe('sensorEyeColor', () => {
+  it('고장(Failed) 로봇은 task와 무관하게 항상 빨강', () => {
+    expect(sensorEyeColor({ status: { kind: 'Failed' }, task: 'Idle' })).toBe('#e04b3f')
+    expect(sensorEyeColor({ status: { kind: 'Failed' }, task: 'Picking' })).toBe('#e04b3f')
+  })
+
+  it('수리 중(Repairing) 로봇은 task와 무관하게 항상 하늘색', () => {
+    expect(sensorEyeColor({ status: { kind: 'Repairing', remaining_ticks: 50 }, task: 'Idle' })).toBe('#4bc0e0')
+  })
+
+  it('정상(Operational) + Idle은 회색', () => {
+    expect(sensorEyeColor({ status: { kind: 'Operational' }, task: 'Idle' })).toBe('#8a8f96')
+  })
+
+  it('정상(Operational) + 작업 중(Picking/Placing)은 노랑', () => {
+    expect(sensorEyeColor({ status: { kind: 'Operational' }, task: 'Picking' })).toBe('#ffd23a')
+    expect(sensorEyeColor({ status: { kind: 'Operational' }, task: 'Placing' })).toBe('#ffd23a')
   })
 })
 

@@ -17,6 +17,14 @@ export interface SidebarState {
   pathDebugEnabled: boolean
 }
 
+/** 선택 패널을 다시 그려야 하는지 판단하는 데 쓰는 값만 뽑는다 — 로봇의
+ * 위치/leg_cycle_progress/arm_pose 등은 매 틱(20Hz) 바뀌지만 패널에는
+ * 안 보이므로 이 값들이 바뀌었다고 다시 그릴 필요가 없다. */
+function selectedPanelSignature(robot: RobotView | null): string {
+  if (!robot) return 'none'
+  return `${robot.id}|${robot.status.kind}|${robot.status.kind === 'Repairing' ? robot.status.remaining_ticks : ''}|${robot.task}|${robot.durability_remaining}`
+}
+
 export class Sidebar {
   private readonly connectionEl: HTMLElement
   private readonly conveyorButton: HTMLButtonElement
@@ -24,6 +32,7 @@ export class Sidebar {
   private readonly pathToggle: HTMLInputElement
   private readonly selectedPanel: HTMLElement
   private readonly callbacks: SidebarCallbacks
+  private lastSelectedPanelSignature: string | null = null
 
   constructor(container: HTMLElement, callbacks: SidebarCallbacks) {
     this.callbacks = callbacks
@@ -73,6 +82,17 @@ export class Sidebar {
     this.conveyorButton.textContent = state.conveyor.running ? '컨베이어 끄기' : '컨베이어 켜기'
     this.robotCountEl.textContent = String(state.robotCount)
     this.pathToggle.checked = state.pathDebugEnabled
+
+    // 선택 패널은 표시 내용이 실제로 바뀔 때만 다시 그린다 — 서버 메시지는
+    // 20Hz(초당 20번)로 계속 오는데, 그때마다 버튼을 통째로 지우고 새로
+    // 만들면 사람이 마우스로 누르는 동안(mousedown~mouseup 사이 100~300ms)
+    // 그 버튼이 여러 번 교체되면서 클릭이 이미 사라진 버튼에 떨어져 무시될
+    // 수 있다(실사용 중 "수리 버튼을 눌러도 반응이 없다"로 실제 발견됨).
+    const signature = selectedPanelSignature(state.selectedRobot)
+    if (signature === this.lastSelectedPanelSignature) {
+      return
+    }
+    this.lastSelectedPanelSignature = signature
 
     this.selectedPanel.innerHTML = ''
     if (!state.selectedRobot) {
