@@ -141,6 +141,38 @@ docker compose up
 
 `http://localhost:8080`에서 배포 환경과 동일한 빌드로 바로 체험 가능하다.
 
+### Fly.io 없이 임시로 외부에 공개하기 (가입/카드 불필요)
+
+Fly.io 무료 체험 기간이 끝나 카드 등록이 필요해진 경우, 또는 그냥 잠깐 동안(면접/데모용으로) 로컬에서 도는 걸 외부에서 보여주고 싶을 때 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)의 "quick tunnel" 기능을 쓰면 가입/카드 전혀 없이 임시 공개 URL을 받을 수 있다. **영구 배포가 아니라 컴퓨터가 켜져 있고 터널이 떠 있는 동안만 유효한 임시 URL**이라는 점이 Fly.io와 다르다.
+
+1) **`cloudflared` 설치** (최초 1회, 컴퓨터당 1번) — 설치 프로그램(winget/MSI)이 관리자 권한 승인을 기다리다 멈추는 경우가 있어서, 설치 없이 바로 쓸 수 있는 단일 실행파일을 받는 걸 권장한다:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.cloudflared-bin" | Out-Null
+Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "$env:USERPROFILE\.cloudflared-bin\cloudflared.exe"
+```
+
+2) **컨테이너를 띄운다**(위 "로컬에서 배포 이미지와 동일하게 실행" 절 그대로, `docker compose up`). 이미 호스트의 8080 포트를 다른 프로그램이 쓰고 있다면(`docker compose up`이 "port is already allocated"로 실패하면) `docker-compose.yml`의 포트 매핑을 임시로 다른 값(예: `8081:8080`)으로 바꾸거나, 빌드된 이미지를 직접 `docker run -p 8081:8080 <이미지 이름>`으로 띄운다.
+
+3) **터널을 연다**:
+
+```powershell
+& "$env:USERPROFILE\.cloudflared-bin\cloudflared.exe" tunnel --protocol http2 --url http://localhost:8080
+```
+
+**`--protocol http2`가 중요하다** — 기본값(QUIC)은 회사/학교 네트워크의 방화벽이 UDP/QUIC을 막거나 간섭하는 경우 `CRYPTO_ERROR ... tls: no application protocol` 같은 오류로 조용히 실패한다(실제로 사내망에서 재현/확인됨). `http2`(TCP 기반)로 강제하면 훨씬 안정적으로 뚫린다.
+
+몇 초 후 아래처럼 실제 접속 가능한 URL이 뜬다(요청마다 무작위로 다른 URL이 나온다 — 고정 도메인이 필요하면 Cloudflare 계정을 만들고 named tunnel을 써야 하는데, 그건 이 절차의 범위 밖이다):
+
+```
+Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):
+https://<random-words>.trycloudflare.com
+```
+
+이 URL을 그대로 브라우저에서 열면 된다(클라이언트가 같은 오리진에서 WS를 자동 유도하므로 별도 쿼리 파라미터 불필요 — `docker compose up` 배포와 동일한 원리).
+
+**터널을 끄려면** `cloudflared` 프로세스를 종료하면 되고(Ctrl+C, 또는 백그라운드로 띄웠다면 프로세스를 강제 종료), 그 순간 URL은 즉시 무효가 된다 — 다음에 다시 열면 완전히 새로운 무작위 URL이 나온다.
+
 ## 프로토콜
 
 WebSocket(`/ws`)과 REST가 역할을 분리한다 — WS는 실시간 게임 상태(20Hz), REST는 설정/통계처럼 느리게 바뀌는 데이터.
