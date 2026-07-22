@@ -82,6 +82,7 @@ function main(): void {
         connection.send({ type: 'RepairRobot', robot_id: selectedRobotId })
       }
     },
+    onRepairAll: () => connection.send({ type: 'RepairAllRobots' }),
     onTogglePathDebug: (enabled) => {
       pathDebugEnabled = enabled
       renderSidebar()

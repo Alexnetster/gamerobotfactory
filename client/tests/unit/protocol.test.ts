@@ -57,4 +57,9 @@ describe('encodeClientCommand', () => {
     const json = encodeClientCommand({ type: 'TriggerArmAction', robot_id: 3, task: 'Picking' })
     expect(JSON.parse(json)).toEqual({ type: 'TriggerArmAction', robot_id: 3, task: 'Picking' })
   })
+
+  it('encodes RepairAllRobots with no extra fields', () => {
+    const json = encodeClientCommand({ type: 'RepairAllRobots' })
+    expect(JSON.parse(json)).toEqual({ type: 'RepairAllRobots' })
+  })
 })

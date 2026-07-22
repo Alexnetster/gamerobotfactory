@@ -127,6 +127,22 @@ impl GameState {
         robot.status = RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS };
         Ok(())
     }
+
+    /// 현재 `Failed`인 로봇 전부를 한 번에 수리 시작 상태로 전이시킨다.
+    /// `repair_robot`과 같은 전이를 쓰지만, 대상이 아예 없거나 일부만
+    /// `Failed`여도 오류를 내지 않는다("전부 다"라는 벌크 커맨드의
+    /// 의미상 부분 매칭이 실패가 아니기 때문) — 실제로 수리를 시작시킨
+    /// 로봇 수를 반환해서 로깅/관측에 쓸 수 있게 한다.
+    pub fn repair_all_failed_robots(&mut self) -> usize {
+        let mut repaired = 0;
+        for robot in self.sim.robots.iter_mut() {
+            if robot.status == RobotStatus::Failed {
+                robot.status = RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS };
+                repaired += 1;
+            }
+        }
+        repaired
+    }
 }
 
 #[cfg(test)]
@@ -278,6 +294,33 @@ mod tests {
         let mut state = empty_state();
         let err = state.repair_robot(999);
         assert_eq!(err, Err(CommandError::RobotNotFound(999)));
+    }
+
+    #[test]
+    fn repair_all_failed_robots_repairs_only_the_failed_ones_and_counts_them() {
+        let mut state = empty_state();
+        state.set_robot_count(3);
+        state.sim.robots[0].status = RobotStatus::Failed;
+        state.sim.robots[1].status = RobotStatus::Operational;
+        state.sim.robots[2].status = RobotStatus::Failed;
+
+        let repaired = state.repair_all_failed_robots();
+
+        assert_eq!(repaired, 2);
+        assert_eq!(state.sim.robots[0].status, RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS });
+        assert_eq!(state.sim.robots[1].status, RobotStatus::Operational, "an already-Operational robot must be left alone");
+        assert_eq!(state.sim.robots[2].status, RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS });
+    }
+
+    #[test]
+    fn repair_all_failed_robots_is_a_harmless_no_op_when_nothing_is_failed() {
+        let mut state = empty_state();
+        state.set_robot_count(2);
+
+        let repaired = state.repair_all_failed_robots();
+
+        assert_eq!(repaired, 0);
+        assert!(state.sim.robots.iter().all(|r| r.status == RobotStatus::Operational));
     }
 
     #[test]

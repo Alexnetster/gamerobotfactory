@@ -234,6 +234,39 @@ async fn repair_robot_on_a_healthy_robot_is_rejected_without_crashing_the_connec
 }
 
 #[tokio::test]
+async fn repair_all_robots_is_accepted_as_a_harmless_no_op_when_nothing_is_failed() {
+    // RepairAllRobots는 (RepairRobot과 달리) 대상이 하나도 없어도 오류가
+    // 아니다 — game_state.rs의 결정적 단위테스트가 이미 "Failed인 것만
+    // 골라서 수리하고 개수를 반환한다"를 증명하므로, 여기서는 실제 서버로
+    // 이 커맨드를 보내도 연결이 안 죽는다는 것만 확인한다.
+    let server = spawn_server();
+
+    let url = format!("ws://127.0.0.1:{}/ws", server.port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .expect("failed to connect to ws endpoint");
+    let (mut write, mut read) = ws_stream.split();
+
+    let _first = read.next().await.expect("stream ended early");
+
+    write.send(Message::Text(r#"{"type":"SetRobotCount","count":2}"#.to_string())).await.unwrap();
+    write.send(Message::Text(r#"{"type":"RepairAllRobots"}"#.to_string())).await.unwrap();
+    write.send(Message::Text(r#"{"type":"ToggleConveyor"}"#.to_string())).await.unwrap();
+
+    let mut still_connected = false;
+    for _ in 0..20 {
+        match tokio::time::timeout(Duration::from_millis(200), read.next()).await {
+            Ok(Some(Ok(_))) => {
+                still_connected = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(still_connected, "connection should survive a RepairAllRobots command with nothing to repair");
+}
+
+#[tokio::test]
 async fn carrying_flag_flows_over_the_wire_during_a_work_cycle() {
     // 컨베이어는 기본적으로 running:true이므로, 로봇이 하나라도 생기면
     // 작업 사이클(Picking -> carrying:true -> Placing -> carrying:false)이

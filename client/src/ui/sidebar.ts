@@ -6,6 +6,7 @@ export interface SidebarCallbacks {
   onChangeRobotCount: (delta: number) => void
   onSelectArmAction: (task: 'Idle' | 'Picking' | 'Placing') => void
   onRepair: () => void
+  onRepairAll: () => void
   onTogglePathDebug: (enabled: boolean) => void
 }
 
@@ -61,6 +62,14 @@ export class Sidebar {
     globalSection.appendChild(decButton)
     globalSection.appendChild(this.robotCountEl)
     globalSection.appendChild(incButton)
+
+    // 개별 로봇을 하나씩 선택해서 수리하는 게 번거로울 만큼 여러 대가
+    // 동시에 고장나는 경우를 위한 일괄 수리 — 고장난 로봇이 하나도 없어도
+    // 눌러서 해로울 게 없으므로(서버가 조용히 무시함) 항상 활성 상태로 둔다.
+    const repairAllButton = document.createElement('button')
+    repairAllButton.textContent = '전체 수리'
+    repairAllButton.addEventListener('click', () => callbacks.onRepairAll())
+    globalSection.appendChild(repairAllButton)
 
     const pathLabel = document.createElement('label')
     this.pathToggle = document.createElement('input')

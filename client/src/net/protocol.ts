@@ -60,6 +60,7 @@ export type ClientCommand =
   | { type: 'SetRobotCount'; count: number }
   | { type: 'TriggerArmAction'; robot_id: number; task: WireTask }
   | { type: 'RepairRobot'; robot_id: number }
+  | { type: 'RepairAllRobots' }
   | { type: 'Resume'; session_id: string }
 
 /** 파싱 실패(잘못된 JSON, `kind` 없음)는 예외 대신 `null` — 서버의

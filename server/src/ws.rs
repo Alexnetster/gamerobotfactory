@@ -194,6 +194,10 @@ fn apply_command(state: &mut GameState, command: ClientCommand) {
                 tracing::warn!(?err, "RepairRobot rejected");
             }
         }
+        RepairAllRobots => {
+            let repaired = state.repair_all_failed_robots();
+            tracing::info!(repaired, "RepairAllRobots processed");
+        }
         // handle_socket intercepts Resume before calling apply_command, so this
         // arm should be unreachable in practice; kept only to satisfy the
         // exhaustive match now that ClientCommand has a Resume variant.

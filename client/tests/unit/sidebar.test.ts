@@ -27,6 +27,7 @@ function makeSidebar(container: HTMLElement, overrides: Partial<SidebarCallbacks
     onChangeRobotCount: vi.fn(),
     onSelectArmAction: vi.fn(),
     onRepair: vi.fn(),
+    onRepairAll: vi.fn(),
     onTogglePathDebug: vi.fn(),
     ...overrides,
   }
@@ -128,6 +129,18 @@ describe('Sidebar', () => {
     expect(container.textContent).toContain('Repairing (99)')
     const repairButtonWhileRepairing = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '수리') as HTMLButtonElement
     expect(repairButtonWhileRepairing.disabled).toBe(true)
+  })
+
+  it('calls onRepairAll when the "전체 수리" button is clicked, even with nothing selected', () => {
+    const container = document.createElement('div')
+    const onRepairAll = vi.fn()
+    const sidebar = makeSidebar(container, { onRepairAll })
+
+    sidebar.update({ connection: { kind: 'open' }, conveyor: { running: true }, robotCount: 3, selectedRobot: null, pathDebugEnabled: false })
+    const repairAllButton = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === '전체 수리') as HTMLButtonElement
+    repairAllButton.click()
+
+    expect(onRepairAll).toHaveBeenCalledOnce()
   })
 
   it('shows the reconnecting attempt count', () => {

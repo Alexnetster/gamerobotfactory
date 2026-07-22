@@ -18,6 +18,11 @@ pub enum ClientCommand {
     SetRobotCount { count: usize },
     TriggerArmAction { robot_id: u32, task: WireTask },
     RepairRobot { robot_id: u32 },
+    /// 현재 Failed 상태인 로봇 전부에게 한 번에 수리를 시작시킨다 —
+    /// 이미 Repairing/Operational인 로봇은 조용히 건너뛴다(개별
+    /// `RepairRobot`이 `RobotNotFailed`로 거부하는 것과 달리, 이건
+    /// "전부 다"라는 의도라 부분 실패를 오류로 취급하지 않는다).
+    RepairAllRobots,
     /// 유예시간 내 재접속인지 확인만 하는 순수 검증 커맨드다. 매 연결마다
     /// 항상 새 세션이 발급되고(핸드셰이크 시점에 이미 스냅샷과 함께
     /// 나간다), 델타 기준선이 전역 공유이므로 `Resume`이 서버 쪽에서
@@ -264,6 +269,15 @@ mod tests {
     }
 
     #[test]
+    fn repair_all_robots_command_round_trips_through_json() {
+        let cmd = ClientCommand::RepairAllRobots;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"type":"RepairAllRobots"}"#);
+        let back: ClientCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, back);
+    }
+
+    #[test]
     fn robot_view_reports_operational_status_by_default() {
         use sim_core::sim::Robot;
         let robot = Robot::new(1, (0, 0), (0, 0));
@@ -274,12 +288,15 @@ mod tests {
 
     #[test]
     fn robot_view_quantizes_durability_to_the_nearest_five_percent() {
-        use sim_core::sim::Robot;
+        use sim_core::sim::{Robot, WEAR_LIMIT_TICKS};
         let mut robot = Robot::new(1, (0, 0), (0, 0));
-        // wear_ratio = 3300/6000 = 0.55 -> raw durability_remaining 0.45,
-        // 이미 5%의 배수라 반올림 여부와 무관하게 정확히 0.45가 나와야 한다.
-        // (WEAR_LIMIT_TICKS가 2000->6000으로 튜닝되면서 3300으로 갱신됨.)
-        robot.worn_ticks = 3300;
+        // wear_ratio 0.55 -> raw durability_remaining 0.45, 이미 5%의
+        // 배수라 반올림 여부와 무관하게 정확히 0.45가 나와야 한다.
+        // `WEAR_LIMIT_TICKS`에서 직접 계산해서, 이 상수가 나중에 또
+        // 튜닝돼도(실제로 이번 세션에서만 2000->6000->20000으로 두 번
+        // 바뀜) 이 테스트가 하드코딩된 숫자 때문에 조용히 틀려지지 않게
+        // 한다.
+        robot.worn_ticks = (WEAR_LIMIT_TICKS as f64 * 0.55) as u64;
 
         let view = RobotView::from(&robot);
 
