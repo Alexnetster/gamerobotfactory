@@ -27,7 +27,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/3] Done. Server should be live at http://localhost:8080
+echo [3/3] Done. Server should be live at http://localhost:8081
+echo (8080 is occupied by an unrelated container on this machine - override with the HOST_PORT env var if 8081 also conflicts)
 echo (docker compose logs -f   to watch logs, docker compose down   to stop)
 echo.
 pause

@@ -16,7 +16,7 @@
 docker compose up
 ```
 
-만 실행하면 `http://localhost:8080`에서 서버+클라이언트가 하나의 컨테이너로 뜬다.
+만 실행하면 `http://localhost:8081`에서 서버+클라이언트가 하나의 컨테이너로 뜬다(8080이 아닌 이유: 흔히 다른 프로그램이 8080을 이미 쓰고 있어서 기본값을 8081로 잡았다 — 다른 포트가 필요하면 `HOST_PORT` 환경변수로 덮어쓸 수 있다).
 
 ## 핵심 엔지니어링 결정
 
@@ -139,7 +139,7 @@ flyctl logs     # 문제가 생기면 실시간 로그 확인
 docker compose up
 ```
 
-`http://localhost:8080`에서 배포 환경과 동일한 빌드로 바로 체험 가능하다.
+`http://localhost:8081`에서 배포 환경과 동일한 빌드로 바로 체험 가능하다(8081인 이유와 `HOST_PORT` 오버라이드는 위 "빠른 시작" 절 참고).
 
 ### Fly.io 없이 임시로 외부에 공개하기 (가입/카드 불필요)
 
@@ -152,12 +152,12 @@ New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.cloudflared-bin" | 
 Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "$env:USERPROFILE\.cloudflared-bin\cloudflared.exe"
 ```
 
-2) **컨테이너를 띄운다**(위 "로컬에서 배포 이미지와 동일하게 실행" 절 그대로, `docker compose up`). 이미 호스트의 8080 포트를 다른 프로그램이 쓰고 있다면(`docker compose up`이 "port is already allocated"로 실패하면) `docker-compose.yml`의 포트 매핑을 임시로 다른 값(예: `8081:8080`)으로 바꾸거나, 빌드된 이미지를 직접 `docker run -p 8081:8080 <이미지 이름>`으로 띄운다.
+2) **컨테이너를 띄운다**(위 "로컬에서 배포 이미지와 동일하게 실행" 절 그대로, `docker compose up`, 기본 포트는 8081). 8081마저 다른 프로그램이 쓰고 있다면(`docker compose up`이 "port is already allocated"로 실패하면) `HOST_PORT=8082 docker compose up`처럼 환경변수로 다른 값을 지정하거나, 빌드된 이미지를 직접 `docker run -p 8082:8080 <이미지 이름>`으로 띄운다.
 
-3) **터널을 연다**:
+3) **터널을 연다**(포트를 바꿨다면 아래 URL도 그에 맞게 수정):
 
 ```powershell
-& "$env:USERPROFILE\.cloudflared-bin\cloudflared.exe" tunnel --protocol http2 --url http://localhost:8080
+& "$env:USERPROFILE\.cloudflared-bin\cloudflared.exe" tunnel --protocol http2 --url http://localhost:8081
 ```
 
 **`--protocol http2`가 중요하다** — 기본값(QUIC)은 회사/학교 네트워크의 방화벽이 UDP/QUIC을 막거나 간섭하는 경우 `CRYPTO_ERROR ... tls: no application protocol` 같은 오류로 조용히 실패한다(실제로 사내망에서 재현/확인됨). `http2`(TCP 기반)로 강제하면 훨씬 안정적으로 뚫린다.

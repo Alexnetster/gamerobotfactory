@@ -2,7 +2,9 @@ services:
   app:
     build: .
     ports:
-      - "8080:8080"
+      # 기본 8081: 이 머신에서 8080은 무관한 phpmyadmin 컨테이너가 항상 점유 중.
+      # 다른 포트가 필요하면 HOST_PORT 환경변수로 덮어쓰기.
+      - "${HOST_PORT:-8081}:8080"
     volumes:
       - gamerobotfactory-data:/data
     environment:
