@@ -1,16 +1,8 @@
 use crate::grid::{CellId, Grid};
-use crate::pathfind::find_path;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-const REPATH_INTERVAL: u32 = 10;
-// 로봇이 매 틱(20Hz, 50ms)마다 한 칸씩 움직이면 초당 20칸이라 화면에서
-// 너무 빠르게 스치듯 보인다(배포 후 실측 피드백) — 순찰 이동만 이
-// 배수만큼 늦춰서 여러 틱에 한 번씩 걷게 한다. 다리 애니메이션도 실제로
-// 이동이 일어난 틱에만 전진하므로(tick()의 post-processing 참고) 자연스럽게
-// "한 걸음 걷고 잠깐 멈춤"의 리듬이 된다. 튜닝 대상.
-const PATROL_MOVE_INTERVAL_TICKS: u64 = 3;
 const LEG_CYCLE_SPEED: f32 = 0.1;
 // 1000초(약 17분) 분량의 작업(20Hz 기준) — 튜닝 대상. 2000(100초) →
 // 6000(5분)으로 한 번 완화했으나, 실사용 피드백("수리 후에도 금방 다시
@@ -28,8 +20,6 @@ pub const REPAIR_TICKS: u32 = 100; // 20Hz 기준 5초 — 튜닝 대상. 나중
 pub const PICK_TICKS: u32 = 20; // 20Hz 기준 약 1초 — 튜닝 대상
 pub const PLACE_TICKS: u32 = 20; // 20Hz 기준 약 1초 — 튜닝 대상
 pub const UNIT_PER_CYCLE: f32 = 1.0; // 배치 1회 완료당 생산량 — main.rs가 참조
-const PICKUP_SEED: u64 = 0;
-const PLACE_SEED: u64 = 1;
 
 // 조립 라인 레이아웃(설계문서 §1) — 그리드(9x7, main.rs::initial_state와 일치)
 // 가운데 가로줄이 벨트, 그 위 칸이 창고 구역. 값 자체는 이 레이아웃
@@ -284,9 +274,15 @@ impl SimState {
     }
 }
 
+/// 한 틱 안에서 무언가(로봇 또는 제품)가 `from`에서 `to`로 이동하려는
+/// 의도. 로봇과 제품은 서로 다른 배열에 살지만 "같은 칸을 여러이 동시에
+/// 노리면 id가 작은 쪽이 이긴다"는 타이브레이크 규칙은 완전히 같으므로
+/// (설계문서 §7), 이 구조체와 `resolve_intents`를 그대로 공유한다 —
+/// 제품 전용으로 거의 같은 함수를 새로 만드는 건 이 프로젝트의 중복
+/// 방지 원칙에 어긋난다.
 #[derive(Debug, Clone, Copy)]
 struct MoveIntent {
-    robot_id: u32,
+    mover_id: u32,
     from: CellId,
     to: CellId,
 }
@@ -297,11 +293,17 @@ struct MoveIntent {
 /// 계산 중인 결과를 참조하지 않아 데이터 경쟁이 없다.
 pub fn tick(state: &SimState, conveyor_running: bool) -> SimState {
     let occupied: HashSet<CellId> = state.robots.iter().map(|r| r.pos).collect();
+    let active_stations: HashSet<u8> = state
+        .stations
+        .iter()
+        .filter(|s| state.products.iter().any(|p| p.pos == s.belt_cell && p.work_ticks_remaining > 0))
+        .map(|s| s.index)
+        .collect();
 
     let planned: Vec<Robot> = state
         .robots
         .par_iter()
-        .map(|robot| safe_plan_robot(&state.grid, robot, &occupied, state.tick_count, conveyor_running))
+        .map(|robot| safe_plan_robot(&state.grid, robot, &occupied, state.tick_count, conveyor_running, &active_stations))
         .collect();
 
     let intents: Vec<MoveIntent> = state
@@ -309,7 +311,7 @@ pub fn tick(state: &SimState, conveyor_running: bool) -> SimState {
         .iter()
         .zip(planned.iter())
         .map(|(original, planned)| MoveIntent {
-            robot_id: original.id,
+            mover_id: original.id,
             from: original.pos,
             to: planned.pos,
         })
@@ -341,169 +343,73 @@ pub fn tick(state: &SimState, conveyor_running: bool) -> SimState {
         })
         .collect();
 
+    let (new_products, new_stations) = if conveyor_running {
+        plan_products(&state.products, &state.stations)
+    } else {
+        (state.products.clone(), state.stations.clone())
+    };
+
     SimState {
         grid: state.grid.clone(),
         robots: new_robots,
-        products: state.products.clone(),
-        stations: state.stations.clone(),
+        products: new_products,
+        stations: new_stations,
         tick_count: state.tick_count + 1,
     }
 }
 
-/// 로봇 id로부터 결정적으로 계산되는 순찰 지점 두 개. 그리드 폭/높이 중
-/// 1보다 큰 축만 절반만큼 떨어뜨려서 두 지점이 항상 서로 다르다는 걸
-/// 보장한다 — 실제 그리드 크기(프로덕션 10x10)뿐 아니라 기존
-/// 유닛테스트가 쓰는 가늘고 긴 그리드(예: 5x1)에서도 안전하다.
-fn patrol_points(id: u32, grid: &Grid) -> (CellId, CellId) {
-    let w = grid.width.max(1);
-    let h = grid.height.max(1);
-    let a = ((id as i32 * 7).rem_euclid(w), (id as i32 * 3).rem_euclid(h));
-    let dx = if w > 1 { w / 2 } else { 0 };
-    let dy = if h > 1 { h / 2 } else { 0 };
-    let b = ((a.0 + dx).rem_euclid(w), (a.1 + dy).rem_euclid(h));
-    (a, b)
-}
-
-/// 로봇이 목표에 도착했을 때 다음 순찰 목표를 계산한다 — 현재 목표가
-/// A면 B로, 그 외(B거나 스폰 시점의 초기 goal==pos)엔 A로.
-fn next_patrol_goal(robot: &Robot, grid: &Grid) -> CellId {
-    let (a, b) = patrol_points(robot.id, grid);
-    if robot.goal == a { b } else { a }
-}
-
-/// 작업 사이클의 픽업/배치 지점 — `patrol_points`와 달리 그리드 전체
-/// (`w*h`칸)에 걸쳐 해시로 분산시킨다. `patrol_points`는 x/y를 각각
-/// `id*7 mod w`/`id*3 mod h`로 독립 계산해서 정확히 w(보통 10)대마다
-/// 좌표 쌍이 완전히 겹치는데(주기가 w에 불과), 순찰에서는 스쳐 지나가는
-/// 통과점이라 무해했지만(로봇이 거기 머무르지 않음) 작업 사이클은 이
-/// 지점에서 `PICK_TICKS`/`PLACE_TICKS` 동안 정지하므로 겹치면 다른
-/// 로봇이 훨씬 오래 못 들어갈 수 있다(설계문서 §4). `deterministic_roll`
-/// (마모/고장 판정에 쓰는 것과 같은 순수 해시 함수)을 재사용해 벨트 칸
-/// 하나를 인덱스로 뽑으면 주기가 벨트 칸 수만큼 늘어나 충돌 확률이
-/// 크게 줄어든다(완전히 없어지지는 않음 — 잔여 한계는 설계문서 §4 참고,
-/// 의도적으로 받아들인 한계라 재시도 로직은 만들지 않는다).
-///
-/// 픽업/배치 지점은 그리드 아무 칸이나가 아니라 반드시 컨베이어 벨트
-/// 칸(`belt_cells`) 중에서 고른다 — 원래는 그리드 전체에서 골랐으나,
-/// 그러면 "컨베이어는 돌아가는데 화물은 그것과 무관한 허공에서 갑자기
-/// 나타났다 사라진다"는 실사용 피드백으로 바꿨다.
-fn work_points(id: u32, grid: &Grid) -> (CellId, CellId) {
-    let cells = belt_cells(grid);
-    let cell_count = cells.len().max(1);
-    let pickup_idx = (deterministic_roll(id, PICKUP_SEED) * cell_count as f64) as usize % cell_count;
-    let mut place_idx = (deterministic_roll(id, PLACE_SEED) * cell_count as f64) as usize % cell_count;
-    if place_idx == pickup_idx {
-        place_idx = (place_idx + 1) % cell_count;
-    }
-    (cells[pickup_idx], cells[place_idx])
-}
-
-/// 컨베이어 벨트가 차지하는 칸 — 위/왼쪽/아래쪽 세 변, 오른쪽(사이드바
-/// 쪽) 개방인 U자 모양. `client/src/render/canvas.ts::isConveyorCell`과
-/// 정확히 같은 정의를 서버에도 둬서, 클라이언트가 장식으로 그리는 벨트와
-/// 서버가 실제로 작업 지점으로 쓰는 칸이 일치하게 한다.
-fn belt_cells(grid: &Grid) -> Vec<CellId> {
-    let w = grid.width.max(1);
-    let h = grid.height.max(1);
-    (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| y == 0 || y == h - 1 || x == 0).collect()
-}
-
-fn plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64, conveyor_running: bool) -> Robot {
+fn plan_robot(
+    _grid: &Grid,
+    robot: &Robot,
+    _occupied: &HashSet<CellId>,
+    tick_count: u64,
+    _conveyor_running: bool,
+    active_stations: &HashSet<u8>,
+) -> Robot {
     let mut next = update_status(robot.clone(), tick_count);
 
     if next.status != RobotStatus::Operational {
-        // Failed/Repairing 로봇은 이동도, 재계획도 하지 않고 제자리에
-        // 얼어붙는다. 다른 로봇들의 A*는 `occupied`(아래 tick() 참고)가
-        // 매 틱 전체 로봇 위치로 다시 계산되므로, 이 로봇은 자동으로
-        // 장애물 취급된다 — 그리드 쪽에 새 코드가 필요 없다.
         return next;
     }
 
-    if !conveyor_running {
-        // 컨베이어가 꺼져 있으면 작업 사이클을 유지할 이유가 없다 — 진행
-        // 중이던 픽업/배치를 즉시 취소하고 순찰로 되돌아간다.
-        if next.task != Task::Idle || next.carrying || next.work_ticks_remaining > 0 {
-            next.task = Task::Idle;
-            next.carrying = false;
-            next.work_ticks_remaining = 0;
+    match next.role {
+        // 조립 로봇은 절대 이동하지 않는다(설계문서 §1, §4) — 실제 조립
+        // 작업(재고 소모/제품 stage 증가)은 로봇이 아니라 제품 쪽 틱
+        // 로직(plan_products, 아래)이 스테이션 상태를 직접 갱신한다.
+        // 여기서는 `task`만 "지금 그 스테이션에 제품이 있고 조립
+        // 카운트다운 중인가"를 반영해서 채운다 — `update_status`의 마모
+        // 축적 조건(`task == Picking`)이 조립 로봇에도 그대로 적용되게
+        // 하기 위함(설계문서 §9 "로봇 내구도/고장/수리는 그대로 재사용").
+        // `active_stations`는 `tick()`이 *이전 틱* 제품/스테이션 스냅샷에서
+        // 미리 계산해 넘겨준 값이라(이중버퍼 패턴, 로봇 이동의 `occupied`와
+        // 같은 이유), 위 `update_status`가 방금 소비한 `next.task`(이전
+        // 틱에 이 함수가 설정해 둔 값)와 자연스럽게 한 틱 지연이 있다 —
+        // 기존 마모 축적도 원래 이런 한 틱 지연 패턴이었으므로(§ worn_ticks
+        // 관련 기존 테스트 참고) 새로 생긴 문제가 아니다.
+        RobotRole::Assembly { station_index } => {
+            next.task = if active_stations.contains(&station_index) { Task::Picking } else { Task::Idle };
+            next
         }
-        if next.pos == next.goal {
-            next.goal = next_patrol_goal(&next, grid);
-        }
-        return advance_along_path(grid, next, occupied, tick_count);
-    }
-
-    if next.work_ticks_remaining > 0 {
-        // 픽업/배치 지점에 이미 도착해 카운트다운 중 — 이동은 하지 않는다.
-        next.task = if next.carrying { Task::Placing } else { Task::Picking };
-        next.work_ticks_remaining -= 1;
-        if next.work_ticks_remaining == 0 {
-            next.carrying = !next.carrying;
-            next.task = Task::Idle;
-        }
-        return next;
-    }
-
-    let (pickup, place) = work_points(next.id, grid);
-    let target = if next.carrying { place } else { pickup };
-
-    if next.pos != target {
-        if next.goal != target {
-            next.goal = target;
-            next.path.clear();
-            next.ticks_until_repath = 0;
-        }
-        next.task = Task::Idle;
-        return advance_along_path(grid, next, occupied, tick_count);
-    }
-
-    next.goal = target;
-    next.task = if next.carrying { Task::Placing } else { Task::Picking };
-    next.work_ticks_remaining = if next.carrying { PLACE_TICKS } else { PICK_TICKS };
-    next
-}
-
-/// 목표(`next.goal`)를 향해 경로를 찾고 한 칸 이동을 시도한다 — 순찰과
-/// 작업 사이클 모두 "그리드 위에서 목표까지 걸어간다"는 점은 같고
-/// 목표를 무엇으로 삼을지만 다르므로, 이 로직은 공유한다.
-fn advance_along_path(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, tick_count: u64) -> Robot {
-    if next.path.is_empty() || next.ticks_until_repath == 0 {
-        let mut blocked = occupied.clone();
-        blocked.remove(&next.pos);
-        next.path = find_path(grid, next.pos, next.goal, &blocked).unwrap_or_default();
-        next.ticks_until_repath = REPATH_INTERVAL;
-    } else {
-        next.ticks_until_repath -= 1;
-    }
-
-    // `u64::is_multiple_of`(clippy가 권하는 표현)는 Dockerfile이 고정한
-    // `rust:1.85-bookworm`에서 아직 unstable(rust-lang/rust#128101)이라
-    // Docker 빌드가 깨진다 — 로컬 최신 stable에서만 통과하는 걸 실제
-    // Docker 빌드로 재현해서 확인했다. 이식성을 위해 `%`로 되돌린다.
-    #[allow(clippy::manual_is_multiple_of)]
-    if tick_count % PATROL_MOVE_INTERVAL_TICKS == 0 {
-        if let Some(&next_cell) = next.path.first() {
-            // `find_path`는 `start`를 제외한 경로를 반환하므로 `next_cell`이
-            // `robot.pos`(현재 칸)와 같아지는 경우는 없다 — 그래서 여기서는
-            // `occupied` 검사만으로 충분하다.
-            if !occupied.contains(&next_cell) {
-                next.pos = next_cell;
-                next.path.remove(0);
-            }
-            // else: 다른 로봇이 지난 틱 기준으로 그 칸을 차지하고 있다 —
-            // 이번 틱은 멈추고, 곧 돌아올 재계획 주기에서 우회로를 찾는다.
+        RobotRole::Helper => {
+            // Task 3에서 창고<->스테이션/라인시작 이동 로직을 채운다.
+            // 이 태스크 시점에는 헬퍼가 아무 일도 하지 않는다(제자리 대기)
+            // — conveyor_running과 무관하게 항상 정지.
+            next
         }
     }
-    // else: 이동 지연 주기가 아닌 틱 — 경로/재계획 타이머는 정상 진행하되
-    // 실제 한 칸 이동만 이번 틱은 건너뛴다.
-
-    next
 }
 
 /// `plan_robot`을 패닉으로부터 격리한다. 패닉이 나면 해당 로봇은 이번
 /// 틱을 그대로 멈춘 채 넘어가고, 나머지 로봇들의 갱신은 영향받지 않는다.
-fn safe_plan_robot(grid: &Grid, robot: &Robot, occupied: &HashSet<CellId>, tick_count: u64, conveyor_running: bool) -> Robot {
-    safe_call(robot, || plan_robot(grid, robot, occupied, tick_count, conveyor_running))
+fn safe_plan_robot(
+    grid: &Grid,
+    robot: &Robot,
+    occupied: &HashSet<CellId>,
+    tick_count: u64,
+    conveyor_running: bool,
+    active_stations: &HashSet<u8>,
+) -> Robot {
+    safe_call(robot, || plan_robot(grid, robot, occupied, tick_count, conveyor_running, active_stations))
 }
 
 /// Runs `f` (a robot's per-tick update) isolated from panics: if it
@@ -541,17 +447,96 @@ fn resolve_intents(intents: &[MoveIntent]) -> Vec<CellId> {
         winner_by_cell
             .entry(intent.to)
             .and_modify(|winner| {
-                if intent.robot_id < *winner {
-                    *winner = intent.robot_id;
+                if intent.mover_id < *winner {
+                    *winner = intent.mover_id;
                 }
             })
-            .or_insert(intent.robot_id);
+            .or_insert(intent.mover_id);
     }
 
     intents
         .iter()
-        .map(|intent| if winner_by_cell[&intent.to] == intent.robot_id { intent.to } else { intent.from })
+        .map(|intent| if winner_by_cell[&intent.to] == intent.mover_id { intent.to } else { intent.from })
         .collect()
+}
+
+/// 제품 한 틱 전진 + 스테이션 조립 진행(설계문서 §5, §7). 순수 함수 —
+/// `products`/`stations`를 값으로 받아 새 값을 반환한다. 로봇과 마찬가지로
+/// "틱 시작 시점 스냅샷만 읽고 이동 여부를 결정"하는 이중버퍼 패턴을
+/// 따른다(설계문서 §7) — 두 제품이 같은 칸을 노리면 `resolve_intents`가
+/// (로봇과 똑같이) id가 작은 쪽을 이긴다.
+fn plan_products(products: &[Product], stations: &[Station]) -> (Vec<Product>, Vec<Station>) {
+    let occupied: HashSet<CellId> = products.iter().map(|p| p.pos).collect();
+    let mut stations = stations.to_vec();
+
+    // 1단계: 이미 스테이션에 서 있는 제품의 조립 진행/시작.
+    let mut updated: Vec<Product> = products
+        .iter()
+        .cloned()
+        .map(|mut p| {
+            let station = stations
+                .iter_mut()
+                .find(|s| s.belt_cell == p.pos && s.index as usize == p.stage as usize);
+            if let Some(station) = station {
+                if p.work_ticks_remaining > 0 {
+                    p.work_ticks_remaining -= 1;
+                    if p.work_ticks_remaining == 0 {
+                        p.stage += 1;
+                    }
+                } else if station.part_inventory > 0 {
+                    station.part_inventory -= 1;
+                    p.work_ticks_remaining = ASSEMBLY_TICKS;
+                }
+                // else: 재고 0 — 제품은 그 자리에서 그냥 대기(설계문서 §5-2).
+            }
+            p
+        })
+        .collect();
+
+    // 2단계: 전진. "이번 틱에 움직이지 않는" 제품(조립 카운트다운 중이거나,
+    // 재고가 없어 대기 중인 제품)이 서 있는 칸은 다른 제품이 들어갈 수
+    // 없다 — 로봇의 `occupied` 검사와 같은 이유로, 틱 시작 시점 스냅샷
+    // (`occupied`)을 기준으로 판단해 한 틱 안에서 여러 칸이 도미노처럼
+    // 한꺼번에 밀리는 걸 막는다(로봇 이동과 동일한 보수적 규칙).
+    let blocked: HashSet<CellId> = updated
+        .iter()
+        .filter(|p| {
+            p.work_ticks_remaining > 0
+                || stations.iter().any(|s| s.belt_cell == p.pos && s.index as usize == p.stage as usize)
+        })
+        .map(|p| p.pos)
+        .collect();
+
+    let intents: Vec<MoveIntent> = updated
+        .iter()
+        .filter(|p| !blocked.contains(&p.pos))
+        .filter_map(|p| {
+            let target = (p.pos.0 + 1, BELT_ROW);
+            if occupied.contains(&target) {
+                None
+            } else {
+                Some(MoveIntent { mover_id: p.id, from: p.pos, to: target })
+            }
+        })
+        .collect();
+
+    let resolved = resolve_intents(&intents);
+    let resolved_by_id: HashMap<u32, CellId> =
+        intents.iter().zip(resolved).map(|(intent, pos)| (intent.mover_id, pos)).collect();
+    for p in updated.iter_mut() {
+        if let Some(&new_pos) = resolved_by_id.get(&p.id) {
+            p.pos = new_pos;
+        }
+    }
+
+    // 3단계: 반출 — `BELT_END_X`는 순수 종료 마커라 제품이 실제로 그
+    // 칸에 머무는 모습은 렌더링되지 않는다(설계문서 §5-3) — 도착하는
+    // 순간 제거된다. 완료 감지(생산량 집계)는 sim_core 밖(main.rs)에서
+    // "이전 틱엔 있었는데 이번 틱엔 없어진 제품 id"로 한다(기존
+    // `detect_completed_placements`와 같은 패턴 — Task 6에서 배선).
+    let remaining: Vec<Product> = updated.into_iter().filter(|p| p.pos.0 < BELT_END_X).collect();
+
+    (remaining, stations)
 }
 
 #[cfg(test)]
@@ -563,119 +548,12 @@ mod tests {
     }
 
     #[test]
-    fn robot_does_not_move_on_a_tick_that_is_not_a_patrol_interval_multiple() {
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
-        state.tick_count = 1; // 1 % PATROL_MOVE_INTERVAL_TICKS(3) != 0
-
-        let next = tick(&state, false);
-
-        assert_eq!(next.robots[0].pos, (0, 0), "이동 지연 주기가 아닌 틱에는 움직이지 않아야 한다");
-    }
-
-    #[test]
-    fn robot_moves_once_the_patrol_interval_tick_arrives() {
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
-        state.tick_count = PATROL_MOVE_INTERVAL_TICKS; // 3 % 3 == 0
-
-        let next = tick(&state, false);
-
-        assert_eq!(next.robots[0].pos, (1, 0), "이동 지연 주기가 돌아온 틱에는 정상적으로 한 칸 이동해야 한다");
-    }
-
-    #[test]
-    fn robot_moves_one_step_toward_goal_each_tick() {
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
-
-        let next = tick(&state, false);
-
-        // tick_count=0은 항상 이동 지연 주기의 배수(0 % N == 0)라 첫 이동은
-        // 지연과 무관하게 즉시 일어난다.
-        assert_eq!(next.robots[0].pos, (1, 0));
-        assert_eq!(next.tick_count, 1);
-    }
-
-    #[test]
-    fn robot_picks_a_new_patrol_goal_and_moves_on_the_same_tick_it_arrives() {
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (2, 0), (2, 0)));
-
-        let next = tick(&state, false);
-
-        assert_ne!(next.robots[0].goal, (2, 0), "arriving at a patrol point should immediately assign the next one");
-        assert_eq!(next.robots[0].pos, (3, 0), "the robot should already be moving toward the new patrol goal");
-    }
-
-    #[test]
-    fn lower_id_wins_when_two_robots_target_same_cell() {
-        // 로봇 1은 (0,0)에서 오른쪽으로, 로봇 2는 (2,0)에서 왼쪽으로 —
-        // 둘 다 (1,0)을 향해 움직이는 정면 대결 시나리오.
-        let mut state = simple_state(3, 1);
-        state.robots.push(Robot::new(1, (0, 0), (2, 0)));
-        state.robots.push(Robot::new(2, (2, 0), (0, 0)));
-
-        let next = tick(&state, false);
-
-        let r1 = next.robots.iter().find(|r| r.id == 1).unwrap();
-        let r2 = next.robots.iter().find(|r| r.id == 2).unwrap();
-        assert_eq!(r1.pos, (1, 0), "낮은 id가 이겨야 한다");
-        assert_eq!(r2.pos, (2, 0), "높은 id는 원래 칸으로 되돌아가야 한다");
-    }
-
-    #[test]
-    fn tick_is_deterministic_across_repeated_runs() {
-        let mut state = simple_state(3, 1);
-        state.robots.push(Robot::new(1, (0, 0), (2, 0)));
-        state.robots.push(Robot::new(2, (2, 0), (0, 0)));
-
-        let positions_a: Vec<CellId> = tick(&tick(&state, false), false).robots.iter().map(|r| r.pos).collect();
-        let positions_b: Vec<CellId> = tick(&tick(&state, false), false).robots.iter().map(|r| r.pos).collect();
-        assert_eq!(positions_a, positions_b);
-    }
-
-    #[test]
     fn safe_call_recovers_from_a_real_panic_and_holds_position() {
         let robot = Robot::new(1, (0, 0), (2, 0));
 
         let result = safe_call(&robot, || panic!("simulated fault in robot update"));
 
         assert_eq!(result.pos, robot.pos);
-    }
-
-    #[test]
-    fn one_robot_panicking_does_not_block_others_from_updating() {
-        // safe_plan_robot으로 모든 로봇 갱신을 감싸도, 정상적인 로봇은
-        // 평소대로 전진해야 한다는 회귀 방지 테스트.
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
-        state.robots.push(Robot::new(2, (4, 0), (4, 0)));
-
-        let next = tick(&state, false);
-
-        let healthy = next.robots.iter().find(|r| r.id == 1).unwrap();
-        assert_eq!(healthy.pos, (1, 0));
-    }
-
-    #[test]
-    fn leg_cycle_progress_advances_while_moving() {
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
-
-        let next = tick(&state, false);
-
-        assert!(next.robots[0].leg_cycle_progress > 0.0);
-    }
-
-    #[test]
-    fn leg_cycle_progress_advances_when_patrol_reassignment_causes_movement() {
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (2, 0), (2, 0)));
-
-        let next = tick(&state, false);
-
-        assert!(next.robots[0].leg_cycle_progress > 0.0, "moving toward the new patrol goal should advance the gait cycle");
     }
 
     #[test]
@@ -835,210 +713,6 @@ mod tests {
     }
 
     #[test]
-    fn facing_updates_to_match_actual_movement_direction() {
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
-
-        let next = tick(&state, false);
-
-        assert_eq!(next.robots[0].facing, Direction::East);
-    }
-
-    #[test]
-    fn facing_does_not_change_when_a_robot_loses_its_tiebreak() {
-        // 로봇 2는 타이브레이크에서 져서 (2,0)에 그대로 남는다 — facing이
-        // 기본값(East)에서 바뀌면 안 된다. plan_robot() 안(타이브레이크 확정
-        // 전)에서 facing을 갱신하면 이 테스트가 실패한다 — "실제로 하지
-        //않은 이동"으로 잘못 회전하는 버그를 정확히 잡아내기 위한 테스트.
-        let mut state = simple_state(3, 1);
-        state.robots.push(Robot::new(1, (0, 0), (2, 0)));
-        state.robots.push(Robot::new(2, (2, 0), (0, 0)));
-
-        let next = tick(&state, false);
-
-        let r2 = next.robots.iter().find(|r| r.id == 2).unwrap();
-        assert_eq!(r2.pos, (2, 0), "진 로봇은 제자리에 남아야 한다(기존 불변식)");
-        assert_eq!(r2.facing, Direction::East, "실제로 이동하지 않았으니 facing도 바뀌면 안 된다");
-    }
-
-    #[test]
-    fn facing_holds_last_direction_while_stationary() {
-        let mut state = simple_state(5, 1);
-        state.robots.push(Robot::new(1, (0, 0), (3, 0)));
-        state = tick(&state, false); // 동쪽으로 한 칸 이동 -> facing = East
-        assert_eq!(state.robots[0].facing, Direction::East);
-
-        // 목표를 직접 바꿀 때는 남아 있는 경로/재계획 타이머도 함께 지워야 한다
-        // — 그러지 않으면 plan_robot()이 새 목표를 무시하고 옛 경로(동쪽)를
-        // 계속 따라간다. 실제 프로덕션 코드에는 이렇게 goal만 단독으로
-        // 바꾸는 경로가 없다(Robot::new에서 한 번만 설정됨) — 이 테스트가
-        // 그 시나리오를 시뮬레이션하려면 tick()의 타이브레이크 패배 분기와
-        // 동일하게 경로를 초기화해줘야 한다.
-        state.robots[0].goal = (0, 0); // 이제 서쪽으로
-        state.robots[0].path.clear();
-        state.robots[0].ticks_until_repath = 0;
-        // PATROL_MOVE_INTERVAL_TICKS 때문에 매 틱 이동하지 않으므로, 그
-        // 주기만큼 반복해서 실제로 한 걸음 내딛을 때까지 돌린다 —
-        // 비둘기집 원리로 이 횟수 안에는 반드시 이동 허용 틱이 낀다.
-        for _ in 0..PATROL_MOVE_INTERVAL_TICKS {
-            state = tick(&state, false);
-        }
-        assert_eq!(state.robots[0].pos, (0, 0), "그 사이 실제로 서쪽으로 한 칸 이동해 있어야 한다");
-        assert_eq!(state.robots[0].facing, Direction::West);
-
-        // 정지 상태에서도 마지막 방향을 유지해야 한다 — 이제 "목표 도착"은
-        // 곧바로 다음 순찰 목표로 재배정되어 다시 움직이므로 더 이상
-        // "정지"를 의미하지 않는다. 진짜로 멈춘 상태를 만들려면 Failed로
-        // 만든다 — plan_robot()이 이동/재계획/순찰 재배정을 전부 건너뛴다.
-        state.robots[0].status = RobotStatus::Failed;
-        for _ in 0..PATROL_MOVE_INTERVAL_TICKS {
-            state = tick(&state, false);
-        }
-        assert_eq!(state.robots[0].facing, Direction::West);
-    }
-
-    #[test]
-    fn patrol_points_are_always_distinct_for_a_reasonably_sized_grid() {
-        let grid = Grid::new(10, 10);
-        for id in 0..20u32 {
-            let (a, b) = patrol_points(id, &grid);
-            assert_ne!(a, b, "patrol points must differ for id {id}");
-        }
-    }
-
-    #[test]
-    fn next_patrol_goal_alternates_between_the_two_patrol_points() {
-        let grid = Grid::new(10, 10);
-        let mut robot = Robot::new(1, (0, 0), (0, 0));
-        let (a, b) = patrol_points(1, &grid);
-        robot.goal = a;
-        assert_eq!(next_patrol_goal(&robot, &grid), b);
-        robot.goal = b;
-        assert_eq!(next_patrol_goal(&robot, &grid), a);
-    }
-
-    #[test]
-    fn work_points_are_always_distinct_for_a_reasonably_sized_grid() {
-        let grid = Grid::new(10, 10);
-        for id in 0..50u32 {
-            let (a, b) = work_points(id, &grid);
-            assert_ne!(a, b, "work points must differ for id {id}");
-        }
-    }
-
-    #[test]
-    fn work_points_always_land_on_a_conveyor_belt_cell() {
-        // 화물이 벨트와 무관한 허공에서 나타났다 사라지는 것처럼 보인다는
-        // 실사용 피드백으로 추가된 제약 — 픽업/배치 지점 둘 다 반드시
-        // 벨트 칸에 속해야 한다. `belt_cells()`를 재사용해 판정하면
-        // `belt_cells()` 자체가 잘못돼도(예: 필터를 실수로 지워 그리드
-        // 전체를 반환하게 됨) 이 테스트가 그 실수를 그대로 베껴서
-        // 통과해버리는 공허한 테스트가 된다(실제로 뮤테이션 테스트로
-        // 확인함) — 그래서 벨트 정의를 여기 독립적으로 다시 써서 판정한다.
-        let grid = Grid::new(9, 7);
-        let (w, h) = (grid.width, grid.height);
-        let is_belt = |(x, y): CellId| y == 0 || y == h - 1 || x == 0;
-        assert!(!is_belt((w / 2, h / 2)), "sanity check: grid center must not itself be a belt cell");
-        for id in 0..50u32 {
-            let (pickup, place) = work_points(id, &grid);
-            assert!(is_belt(pickup), "pickup point {pickup:?} for id {id} is not on the belt");
-            assert!(is_belt(place), "place point {place:?} for id {id} is not on the belt");
-        }
-    }
-
-    #[test]
-    fn belt_cells_form_a_u_shape_open_on_the_right() {
-        let grid = Grid::new(9, 7);
-        let cells = belt_cells(&grid);
-        assert!(cells.contains(&(0, 0)), "top-left corner should be on the belt");
-        assert!(cells.contains(&(8, 0)), "top row should be on the belt");
-        assert!(cells.contains(&(0, 6)), "left column should be on the belt");
-        assert!(cells.contains(&(8, 6)), "bottom row should be on the belt");
-        assert!(!cells.contains(&(8, 3)), "the right side must stay open (not part of the belt)");
-        assert!(!cells.contains(&(4, 3)), "the interior floor must not be part of the belt");
-    }
-
-    #[test]
-    fn full_work_cycle_moves_to_pickup_picks_up_carries_and_places() {
-        let grid = Arc::new(Grid::new(10, 10));
-        let (pickup, place) = work_points(7, &grid);
-        let mut state = SimState::new(grid.clone(), vec![Robot::new(7, pickup, pickup)]);
-
-        state = tick(&state, true);
-        assert_eq!(state.robots[0].task, Task::Picking);
-        assert!(!state.robots[0].carrying);
-
-        // PICK_TICKS - 1번째 틱까지는 아직 카운트다운 중이어야 한다 —
-        // 여기서 멈추고 확인하지 않으면 off-by-one(예: `== 0`을 실수로
-        // `<= 1`로 바꿔 한 틱 일찍 끝내는 회귀)이 통과할 수 있다.
-        for _ in 0..PICK_TICKS - 1 {
-            state = tick(&state, true);
-        }
-        assert!(!state.robots[0].carrying, "PICK_TICKS - 1번 틱까지는 아직 화물을 들면 안 된다");
-        assert_eq!(state.robots[0].task, Task::Picking, "PICK_TICKS - 1번 틱까지는 아직 Picking 중이어야 한다");
-
-        state = tick(&state, true);
-        assert!(state.robots[0].carrying, "정확히 PICK_TICKS번째 틱에 화물을 들고 있어야 한다");
-        assert_eq!(state.robots[0].task, Task::Idle);
-
-        let mut arrived = false;
-        for _ in 0..500 {
-            state = tick(&state, true);
-            if state.robots[0].pos == place {
-                arrived = true;
-                break;
-            }
-        }
-        assert!(arrived, "carrying 로봇은 결국 배치 지점에 도착해야 한다");
-
-        state = tick(&state, true);
-        assert_eq!(state.robots[0].task, Task::Placing);
-
-        // 마찬가지로 PLACE_TICKS - 1번째 틱까지는 아직 내려놓지 않아야 한다.
-        for _ in 0..PLACE_TICKS - 1 {
-            state = tick(&state, true);
-        }
-        assert!(state.robots[0].carrying, "PLACE_TICKS - 1번 틱까지는 아직 화물을 내려놓으면 안 된다");
-        assert_eq!(state.robots[0].task, Task::Placing, "PLACE_TICKS - 1번 틱까지는 아직 Placing 중이어야 한다");
-
-        state = tick(&state, true);
-        assert!(!state.robots[0].carrying, "정확히 PLACE_TICKS번째 틱에 화물을 내려놓아야 한다");
-        assert_eq!(state.robots[0].task, Task::Idle);
-    }
-
-    #[test]
-    fn turning_conveyor_off_mid_work_resets_task_and_carrying_immediately() {
-        let mut robot = Robot::new(1, (0, 0), (0, 0));
-        robot.task = Task::Picking;
-        robot.work_ticks_remaining = 5;
-        robot.carrying = true;
-        let grid = Grid::new(5, 5);
-        let occupied: HashSet<CellId> = HashSet::new();
-
-        let next = plan_robot(&grid, &robot, &occupied, 0, false);
-
-        assert_eq!(next.task, Task::Idle);
-        assert!(!next.carrying);
-        assert_eq!(next.work_ticks_remaining, 0);
-    }
-
-    #[test]
-    fn manual_trigger_arm_action_cannot_skip_the_work_cycle_wait() {
-        let grid = Grid::new(10, 10);
-        let (pickup, _place) = work_points(1, &grid);
-        let mut robot = Robot::new(1, (0, 0), (0, 0));
-        robot.task = Task::Picking; // 오퍼레이터가 수동으로 끼워넣은 값
-
-        let occupied: HashSet<CellId> = HashSet::new();
-        let next = plan_robot(&grid, &robot, &occupied, 0, true);
-
-        assert!(!next.carrying, "manually-set Picking task must not instantly complete without the auto cycle's own countdown");
-        if next.pos != pickup {
-            assert_eq!(next.task, Task::Idle, "auto cycle should overwrite the manual task while still transiting to the pickup point");
-        }
-    }
-
-    #[test]
     fn station_new_derives_correct_cells_from_index() {
         let s0 = Station::new(0);
         assert_eq!(s0.belt_cell, (STATION_XS[0], BELT_ROW));
@@ -1060,5 +734,123 @@ mod tests {
     fn new_robot_defaults_to_helper_role() {
         let robot = Robot::new(1, (0, 0), (0, 0));
         assert_eq!(robot.role, RobotRole::Helper);
+    }
+
+    fn state_with_products(products: Vec<Product>) -> SimState {
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), Vec::new());
+        state.products = products;
+        state
+    }
+
+    #[test]
+    fn product_advances_one_cell_per_tick_when_not_blocked_by_a_station() {
+        let mut state = state_with_products(vec![Product::new(1, (5, BELT_ROW))]);
+        // (5, BELT_ROW)는 스테이션 칸이 아니다(STATION_XS = [2, 4, 6]).
+        state = tick(&state, true);
+        assert_eq!(state.products[0].pos, (6, BELT_ROW));
+    }
+
+    #[test]
+    fn product_stops_at_its_matching_station_and_assembles_over_assembly_ticks() {
+        let station_x = STATION_XS[0];
+        let mut state = state_with_products(vec![Product::new(1, (station_x, BELT_ROW))]);
+
+        state = tick(&state, true);
+        assert_eq!(state.products[0].pos, (station_x, BELT_ROW), "조립 중엔 이동하지 않아야 한다");
+        assert_eq!(state.products[0].stage, 0, "아직 조립이 끝나지 않았다");
+        assert_eq!(state.stations[0].part_inventory, STATION_MAX_INVENTORY - 1, "재고가 정확히 1 소모돼야 한다");
+
+        for _ in 0..ASSEMBLY_TICKS - 1 {
+            state = tick(&state, true);
+        }
+        assert_eq!(state.products[0].stage, 0, "ASSEMBLY_TICKS - 1번째 틱까지는 아직 stage가 오르면 안 된다");
+
+        state = tick(&state, true);
+        assert_eq!(state.products[0].stage, 1, "정확히 ASSEMBLY_TICKS번째 틱에 stage가 올라야 한다");
+    }
+
+    #[test]
+    fn product_waits_in_place_when_its_station_has_no_inventory() {
+        let station_x = STATION_XS[0];
+        let mut state = state_with_products(vec![Product::new(1, (station_x, BELT_ROW))]);
+        state.stations[0].part_inventory = 0;
+
+        for _ in 0..10 {
+            state = tick(&state, true);
+        }
+
+        assert_eq!(state.products[0].pos, (station_x, BELT_ROW), "재고가 없으면 계속 그 자리에서 대기해야 한다");
+        assert_eq!(state.products[0].stage, 0);
+        assert_eq!(state.products[0].work_ticks_remaining, 0, "재고가 없으면 조립 카운트다운이 시작되면 안 된다");
+    }
+
+    #[test]
+    fn product_resumes_automatically_once_inventory_is_replenished() {
+        let station_x = STATION_XS[0];
+        let mut state = state_with_products(vec![Product::new(1, (station_x, BELT_ROW))]);
+        state.stations[0].part_inventory = 0;
+        state = tick(&state, true);
+        assert_eq!(state.products[0].work_ticks_remaining, 0);
+
+        state.stations[0].part_inventory = STATION_MAX_INVENTORY; // 헬퍼가 보충했다고 가정(Task 3에서 실제 배선)
+        state = tick(&state, true);
+        assert!(state.products[0].work_ticks_remaining > 0, "재고가 채워지면 같은 틱에 바로 조립이 재개돼야 한다");
+    }
+
+    #[test]
+    fn a_stalled_product_blocks_the_one_behind_it() {
+        let station_x = STATION_XS[0];
+        let mut state = state_with_products(vec![
+            Product::new(1, (station_x, BELT_ROW)),
+            Product::new(2, (station_x - 1, BELT_ROW)),
+        ]);
+        state.stations[0].part_inventory = 0;
+
+        state = tick(&state, true);
+
+        assert_eq!(state.products.iter().find(|p| p.id == 1).unwrap().pos, (station_x, BELT_ROW));
+        assert_eq!(
+            state.products.iter().find(|p| p.id == 2).unwrap().pos,
+            (station_x - 1, BELT_ROW),
+            "앞이 막혀 있으면 뒤 제품도 전진하면 안 된다"
+        );
+    }
+
+    #[test]
+    fn product_completing_the_final_station_and_reaching_the_belt_end_is_removed() {
+        let mut state = state_with_products(vec![{
+            let mut p = Product::new(1, (BELT_END_X - 1, BELT_ROW));
+            p.stage = STATION_COUNT as u8; // 이미 세 스테이션을 다 거쳤다
+            p
+        }]);
+
+        state = tick(&state, true);
+
+        assert!(state.products.is_empty(), "벨트 끝에 도달한 완성품은 사라져야 한다(반출)");
+    }
+
+    #[test]
+    fn products_do_not_move_or_assemble_while_conveyor_is_off() {
+        let station_x = STATION_XS[0];
+        let state = state_with_products(vec![Product::new(1, (station_x, BELT_ROW))]);
+
+        let next = tick(&state, false);
+
+        assert_eq!(next.products[0].pos, (station_x, BELT_ROW));
+        assert_eq!(next.products[0].work_ticks_remaining, 0);
+        assert_eq!(next.stations[0].part_inventory, STATION_MAX_INVENTORY, "컨베이어가 꺼져 있으면 재고도 소모되면 안 된다");
+    }
+
+    #[test]
+    fn assembly_role_robot_never_moves_even_with_conveyor_running() {
+        let mut robot = Robot::new(1, (STATION_XS[0], STATION_ROBOT_ROW), (0, 0));
+        robot.role = RobotRole::Assembly { station_index: 0 };
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]);
+
+        for _ in 0..20 {
+            state = tick(&state, true);
+        }
+
+        assert_eq!(state.robots[0].pos, (STATION_XS[0], STATION_ROBOT_ROW), "조립 로봇은 절대 이동하면 안 된다");
     }
 }
