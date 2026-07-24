@@ -133,7 +133,12 @@ Plan 5는 설정 파일/문서까지만 스코프였고 실제 `flyctl deploy` �
 
 ## In Progress
 
-현재 진행 중인 Plan 없음 — Plan 1~5 전체 완료. 다음 작업은 Backlog 항목 중에서 고르거나 새 브레인스토밍으로 시작한다.
+### 조립 라인 (일자형 벨트 + 스테이션 + 헬퍼 로봇)
+
+"컨베이어는 왜 돌고, 물건은 어디서 와서 어디로 흘러가는게 아니라, 갑자기 나타나서 갑자기 사라짐?"이라는 실사용 피드백으로 시작된 신규 기능 — 기존 자유이동 픽업→운반→배치 사이클을 완전히 대체하는 일자형 조립 라인. 설계: [`docs/superpowers/specs/2026-07-24-assembly-line-design.md`](superpowers/specs/2026-07-24-assembly-line-design.md), 계획: [`docs/superpowers/plans/2026-07-24-assembly-line-plan.md`](superpowers/plans/2026-07-24-assembly-line-plan.md)(총 10태스크). subagent-driven-development(구현자→스펙 컴플라이언스 리뷰→코드 품질 리뷰/뮤테이션 테스트)로 태스크별 진행 중.
+
+- [x] **Task 1** — `sim_core` 데이터 모델(`Product`/`Station`/`RobotRole`, `SimState.products`/`stations`, `SimState::new` 편의 생성자). 순수 데이터 모델만 추가, 틱 동작은 아직 안 바뀜. 커밋 `2674d27`.
+- [ ] Task 2~10 — 진행 예정(제품 이동/조립 틱 로직, 헬퍼 로직, `game_state`/프로토콜/`main.rs` 배선, 클라이언트 프로토콜/렌더링/사이드바, 통합테스트+문서).
 
 ## Backlog
 
