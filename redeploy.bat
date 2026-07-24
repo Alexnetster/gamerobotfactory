@@ -18,7 +18,7 @@ if errorlevel 1 (
 
 echo.
 echo [2/3] Rebuilding the Docker image and restarting the container...
-docker compose up --build -d
+docker compose up --build -d --force-recreate
 if errorlevel 1 (
     echo.
     echo docker compose failed - is Docker Desktop running?
