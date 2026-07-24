@@ -130,6 +130,7 @@ async fn stats_history_reflects_persisted_rows_after_running() {
 }
 
 #[tokio::test]
+#[ignore = "exercises the old free-roam cycle removed in Task 2; rewritten for the assembly-line model in a later task"]
 async fn production_only_increases_after_a_robot_completes_a_full_work_cycle() {
     let db_path = temp_db_path("production-cycle");
     let server = spawn_server_with_isolated_db(&db_path);

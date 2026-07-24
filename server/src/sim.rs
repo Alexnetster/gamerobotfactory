@@ -853,4 +853,78 @@ mod tests {
 
         assert_eq!(state.robots[0].pos, (STATION_XS[0], STATION_ROBOT_ROW), "조립 로봇은 절대 이동하면 안 된다");
     }
+
+    #[test]
+    fn assembly_robot_task_is_picking_while_its_station_has_a_product_mid_assembly() {
+        // 코드 리뷰(뮤테이션 테스트)에서 지적된 커버리지 공백: plan_robot의
+        // Assembly 분기가 `active_stations`를 무시하고 `next.task = Task::Idle`을
+        // 하드코딩해도 기존 테스트가 전부 통과했다 — 이 테스트가 그 회귀를
+        // 잡는다. `active_stations`는 tick() 시작 시점(이 틱이 시작되기 전)
+        // 제품 스냅샷에서 계산되므로, product를 미리 조립 카운트다운 중인
+        // 상태로 스테이션 벨트 칸에 세워두면 같은 틱에 바로 반영된다.
+        let mut robot = Robot::new(1, (STATION_XS[0], STATION_ROBOT_ROW), (0, 0));
+        robot.role = RobotRole::Assembly { station_index: 0 };
+        let mut product = Product::new(1, (STATION_XS[0], BELT_ROW));
+        product.work_ticks_remaining = 5; // 조립 카운트다운 중
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]);
+        state.products = vec![product];
+
+        let next = tick(&state, true);
+
+        assert_eq!(
+            next.robots[0].task,
+            Task::Picking,
+            "담당 스테이션에 조립 카운트다운 중인 제품이 있으면 조립 로봇의 task도 Picking이어야 한다"
+        );
+    }
+
+    #[test]
+    fn assembly_robot_task_is_idle_when_no_product_is_mid_assembly_at_its_station() {
+        let mut robot = Robot::new(1, (STATION_XS[0], STATION_ROBOT_ROW), (0, 0));
+        robot.role = RobotRole::Assembly { station_index: 0 };
+        let state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]); // products는 비어 있음
+
+        let next = tick(&state, true);
+
+        assert_eq!(
+            next.robots[0].task,
+            Task::Idle,
+            "담당 스테이션에 조립 중인 제품이 없으면 조립 로봇의 task는 Idle이어야 한다"
+        );
+    }
+
+    #[test]
+    fn three_product_traffic_jam_produces_no_duplicate_positions() {
+        // 코드 리뷰(뮤테이션 테스트)에서 발견된 실제 버그 클래스에 대한
+        // 회귀 방지 테스트: plan_products의 전진 판정에서 `occupied`(틱
+        // 시작 시점 전체 제품 위치 스냅샷) 검사를 실수로 `blocked`(조립/
+        // 대기 중이라 이번 틱에 스스로 못 움직이는 제품만 담은 집합)로
+        // 바꾸면, "그냥 벨트 위에 서 있을 뿐 조립도 대기도 아닌" 중간
+        // 제품은 blocked에 안 잡히므로 그 뒤 제품이 그 칸으로 잘못
+        // 전진해 들어가 두 제품이 같은 칸을 공유하는 결정성 붕괴가
+        // 일어난다(실제로 뮤테이션 테스트로 재현: [(2,3),(1,3),(1,3)]).
+        // 3제품 연쇄로 재현: 맨 앞=스테이션에서 조립 카운트다운 중(진짜
+        // blocked), 가운데=그냥 벨트 위에서 앞이 막혀 정지할 뿐인 제품
+        // (blocked엔 안 잡히지만 occupied엔 잡혀야 함), 맨 뒤=가운데
+        // 때문에 막혀야 하는 제품.
+        let station_x = STATION_XS[0];
+        let mut state = state_with_products(vec![
+            Product::new(1, (station_x, BELT_ROW)),
+            Product::new(2, (station_x - 1, BELT_ROW)),
+            Product::new(3, (station_x - 2, BELT_ROW)),
+        ]);
+
+        state = tick(&state, true);
+
+        let front = state.products.iter().find(|p| p.id == 1).unwrap().pos;
+        let middle = state.products.iter().find(|p| p.id == 2).unwrap().pos;
+        let back = state.products.iter().find(|p| p.id == 3).unwrap().pos;
+
+        assert_eq!(front, (station_x, BELT_ROW), "맨 앞은 조립을 막 시작해 그대로 있어야 한다");
+        assert_eq!(middle, (station_x - 1, BELT_ROW), "가운데는 앞이 막혀 있으니 그대로 있어야 한다");
+        assert_eq!(back, (station_x - 2, BELT_ROW), "맨 뒤는 가운데한테 막혀 있으니 그대로 있어야 한다");
+
+        let positions: HashSet<CellId> = state.products.iter().map(|p| p.pos).collect();
+        assert_eq!(positions.len(), state.products.len(), "제품들이 같은 칸을 공유하면 안 된다(결정성 불변식)");
+    }
 }
