@@ -138,7 +138,8 @@ Plan 5는 설정 파일/문서까지만 스코프였고 실제 `flyctl deploy` �
 "컨베이어는 왜 돌고, 물건은 어디서 와서 어디로 흘러가는게 아니라, 갑자기 나타나서 갑자기 사라짐?"이라는 실사용 피드백으로 시작된 신규 기능 — 기존 자유이동 픽업→운반→배치 사이클을 완전히 대체하는 일자형 조립 라인. 설계: [`docs/superpowers/specs/2026-07-24-assembly-line-design.md`](superpowers/specs/2026-07-24-assembly-line-design.md), 계획: [`docs/superpowers/plans/2026-07-24-assembly-line-plan.md`](superpowers/plans/2026-07-24-assembly-line-plan.md)(총 10태스크). subagent-driven-development(구현자→스펙 컴플라이언스 리뷰→코드 품질 리뷰/뮤테이션 테스트)로 태스크별 진행 중.
 
 - [x] **Task 1** — `sim_core` 데이터 모델(`Product`/`Station`/`RobotRole`, `SimState.products`/`stations`, `SimState::new` 편의 생성자). 순수 데이터 모델만 추가, 틱 동작은 아직 안 바뀜. 커밋 `2674d27`.
-- [ ] Task 2~10 — 진행 예정(제품 이동/조립 틱 로직, 헬퍼 로직, `game_state`/프로토콜/`main.rs` 배선, 클라이언트 프로토콜/렌더링/사이드바, 통합테스트+문서).
+- [x] **Task 2** — 기존 자유이동 픽업/운반/배치 사이클(`work_points`/U자 `belt_cells`/`patrol_points`/`advance_along_path` 등) 완전 삭제, 제품이 벨트를 따라 흐르며 스테이션에서 조립되는 `plan_products` 틱 로직 추가. 코드 품질 리뷰의 뮤테이션 테스트가 실제 충돌 버그 1건(`occupied` 대신 `blocked`로 목표 칸 점유 판정 시 3대 제품 정체 상황에서 위치 중복 발생)과 조립 로봇 `task` 파생 로직의 테스트 커버리지 누락을 잡아내 수정함. 옛 자유이동 사이클을 검증하던 통합테스트 2개(`rest_integration`/`ws_integration`)는 이번 태스크로 인해 의도적으로 깨지는 게 맞아 `#[ignore]` + 사유로 표시(Task 10에서 재작성 예정). 커밋 `32d3e84`(구현) + `c30304d`(리뷰 지적 수정).
+- [ ] Task 3~10 — 진행 예정(헬퍼 로직, `game_state`/프로토콜/`main.rs` 배선, 클라이언트 프로토콜/렌더링/사이드바, 통합테스트+문서).
 
 ## Backlog
 
