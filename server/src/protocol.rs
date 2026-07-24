@@ -402,7 +402,9 @@ mod tests {
         use sim_core::sim::SimState;
         use std::sync::Arc;
 
-        let mut state = GameState::new(SimState { grid: Arc::new(Grid::new(3, 3)), robots: Vec::new(), tick_count: 5 });
+        let mut sim = SimState::new(Arc::new(Grid::new(3, 3)), Vec::new());
+        sim.tick_count = 5;
+        let mut state = GameState::new(sim);
         state.set_robot_count(2);
         state.toggle_conveyor();
 

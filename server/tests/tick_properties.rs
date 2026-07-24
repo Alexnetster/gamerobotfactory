@@ -32,7 +32,7 @@ fn arbitrary_sim_state() -> impl Strategy<Value = SimState> {
             .enumerate()
             .map(|(i, (pos, goal))| Robot::new(i as u32, pos, goal))
             .collect();
-        SimState { grid: Arc::new(Grid::new(SIZE, SIZE)), robots, tick_count: 0 }
+        SimState::new(Arc::new(Grid::new(SIZE, SIZE)), robots)
     })
 }
 
@@ -63,7 +63,7 @@ fn arbitrary_sim_state_with_some_frozen_robots() -> impl Strategy<Value = SimSta
                 robot
             })
             .collect();
-        SimState { grid: Arc::new(Grid::new(SIZE, SIZE)), robots, tick_count: 0 }
+        SimState::new(Arc::new(Grid::new(SIZE, SIZE)), robots)
     })
 }
 
