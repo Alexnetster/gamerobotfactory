@@ -307,8 +307,47 @@ impl Station {
     }
 }
 
+// 헬퍼의 실제 목적지(`station_handoff_cell`, 아래)와 조립 로봇 자리를
+// 구분해서 테스트에 명확히 드러내기 위한 헬퍼 — 프로덕션 코드는 이제
+// 이 칸을 직접 계산하지 않는다(`Station::new`가 `robot_cell` 필드를
+// 인라인으로 채움, `plan_helper`/`run_helper_logistics`는 아래
+// `station_handoff_cell`을 쓴다) — 그래서 `#[cfg(test)]`.
+#[cfg(test)]
 fn station_robot_cell(station_index: u8) -> CellId {
     (STATION_XS[station_index as usize], STATION_ROBOT_ROW)
+}
+
+/// `RestockStation`이 실제로 걸어가는 목적지 — 조립 로봇이 영구히 서
+/// 있는 `station_robot_cell` 자체가 아니라 그 한 칸 위(벨트에서 더 먼
+/// 쪽, 창고 구역 y=0..=1 안)다. `STATION_ROBOT_ROW - 1`은 설계문서 §1의
+/// 고정 레이아웃(창고 구역은 조립 로봇 줄보다 한 칸 위)에서 나온 상수라
+/// 튜닝 대상이 아니다.
+///
+/// 왜 필요한가(실측된 배포 정지 버그): 조립 로봇 3대는 스폰 직후
+/// `station.robot_cell`에 영구 고정되고 `plan_robot`의 `Assembly` 분기가
+/// 절대 이동시키지 않는다(위 `RobotRole` 문서 참고) — `GameState::new`가
+/// 이 3대를 항상 자동 스폰하므로 실제 플레이에서 그 칸은 항상 점유돼
+/// 있다. `advance_along_path`의 마지막 한 칸 진입은
+/// `!occupied.contains(&next_cell)`로 막히므로(`HELPER_SPAWN_STAGING_CELLS`
+/// 문서의 같은 규칙), 목적지가 `station_robot_cell`과 정확히 같으면
+/// 헬퍼는 그 한 칸 앞에서 영원히 멈추고 드롭을 완료할 수 없다 —
+/// `part_inventory`가 0에서 절대 안 올라가고 라인 전체가 멈춘다(실측:
+/// 실제 서버를 띄우고 WebSocket으로 관찰, 스테이션 3개 전부 재고 0, 헬퍼
+/// 3대 전부 `carrying: true`로 500틱 이상 정지). 기존 `helper_restocks_a_
+/// station_end_to_end` 테스트가 이 버그를 못 잡은 이유는 그 테스트가
+/// 조립 로봇 없이 헬퍼 하나만 있는 `SimState`를 만들어서 목적지 칸이
+/// 실제로는 비어 있었기 때문 — `helper_restocks_alongside_its_stationary_
+/// assembly_robot` 테스트(아래)가 헬퍼와 그 목적지의 조립 로봇을 함께
+/// 두어 이 상황을 재현한다.
+///
+/// 한 칸 인접한 칸으로 옮겨도 "그 스테이션에 배달한다"는 의미는 유지된다
+/// — 조립 로봇이 인접 핸드오프 지점에서 물건을 건네받는다고 보면 된다.
+/// 이 칸은 `WAREHOUSE_CELL`, `HELPER_SPAWN_STAGING_CELLS`, 다른
+/// 스테이션의 핸드오프 칸과도 겹치지 않는다(x좌표가 `STATION_XS`로 서로
+/// 다르고, y=1은 `HELPER_SPAWN_STAGING_CELLS`의 `(1,1)`/`(7,1)`과도 x가
+/// 다르다).
+fn station_handoff_cell(station_index: u8) -> CellId {
+    (STATION_XS[station_index as usize], STATION_ROBOT_ROW - 1)
 }
 
 #[derive(Debug, Clone)]
@@ -477,7 +516,7 @@ fn plan_helper(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, tick_co
     };
 
     let destination = match task {
-        HelperTask::RestockStation { station_index } => station_robot_cell(station_index),
+        HelperTask::RestockStation { station_index } => station_handoff_cell(station_index),
         HelperTask::DeliverFrame => (BELT_START_X, BELT_ROW),
     };
 
@@ -748,7 +787,7 @@ fn run_helper_logistics(
         }
         let Some(task) = robot.helper_assignment else { continue };
         let at_destination = match task {
-            HelperTask::RestockStation { station_index } => robot.pos == station_robot_cell(station_index),
+            HelperTask::RestockStation { station_index } => robot.pos == station_handoff_cell(station_index),
             HelperTask::DeliverFrame => robot.pos == line_start,
         };
         if !at_destination {
@@ -1179,6 +1218,51 @@ mod tests {
     }
 
     #[test]
+    fn helper_restocks_alongside_its_stationary_assembly_robot() {
+        // 회귀 테스트 — Task 6에서 실제 컴파일된 서버로 실측한 배포 정지
+        // 버그. 위 `helper_restocks_a_station_end_to_end`는 조립 로봇이
+        // 하나도 없는 `SimState`를 만들어서, 목적지 칸이 실제로는 항상
+        // 비어 있는 손쉬운 경우만 검증했다 — 실제 플레이에서는
+        // `GameState::new`가 스테이션마다 조립 로봇 1대를 항상 자동
+        // 스폰하고 그 로봇은 절대 이동하지 않으므로, 이 테스트처럼 헬퍼
+        // "그리고" 그 목적지의 조립 로봇을 함께 넣어야만 진짜 문제(목적지
+        // 칸이 영구히 점유된 상태)를 재현한다. 이 테스트가 고치기 전
+        // 코드(목적지 == `station_robot_cell`)에서 실패하는지는 아래
+        // 뮤테이션 테스트로 별도 확인했다(주석 참고).
+        let mut helper = Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL);
+        helper.role = RobotRole::Helper;
+
+        let mut assembly_robot = Robot::new(2, station_robot_cell(0), station_robot_cell(0));
+        assembly_robot.role = RobotRole::Assembly { station_index: 0 };
+
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![helper, assembly_robot]);
+        state.stations[0].part_inventory = 0;
+
+        let mut restocked = false;
+        for _ in 0..500 {
+            state = tick(&state, true);
+            if state.stations[0].part_inventory == STATION_MAX_INVENTORY {
+                restocked = true;
+                break;
+            }
+        }
+
+        assert!(
+            restocked,
+            "조립 로봇이 목적지 칸에 영구 점유해 있어도 헬퍼가 결국 스테이션 재고를 채워야 한다 \
+             (조립 로봇이 없을 때만 통과하던 예전 테스트로는 이 데드락을 못 잡았다)"
+        );
+        let helper_after = state.robots.iter().find(|r| r.id == 1).unwrap();
+        assert_eq!(helper_after.helper_assignment, None, "임무를 마치면 배정이 풀려야 한다");
+        assert!(!helper_after.carrying);
+        // 조립 로봇은 시나리오 내내 정말 그 자리에 고정돼 있었는지도 확인
+        // — 그렇지 않다면 이 테스트가 원래 재현하려던 "조립 로봇이 목적지를
+        // 영구 점거"라는 조건 자체가 성립하지 않는다.
+        let assembly_after = state.robots.iter().find(|r| r.id == 2).unwrap();
+        assert_eq!(assembly_after.pos, station_robot_cell(0));
+    }
+
+    #[test]
     fn helper_drop_countdown_actually_elapses_after_arriving_and_is_not_skipped() {
         // 계획서에는 없던 추가 테스트 — 리뷰 중 뮤테이션 테스트로 실제
         // 버그를 하나 발견해서 그 회귀를 막기 위해 추가했다. 헬퍼가 목적지
@@ -1200,7 +1284,8 @@ mod tests {
         let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]);
         state.stations[0].part_inventory = 0;
 
-        let manhattan_distance = (WAREHOUSE_CELL.0 - STATION_XS[0]).abs() + (WAREHOUSE_CELL.1 - STATION_ROBOT_ROW).abs();
+        let handoff_cell = station_handoff_cell(0);
+        let manhattan_distance = (WAREHOUSE_CELL.0 - handoff_cell.0).abs() + (WAREHOUSE_CELL.1 - handoff_cell.1).abs();
 
         let mut ticks_elapsed = 0;
         loop {
