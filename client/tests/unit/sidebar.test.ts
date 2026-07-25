@@ -17,6 +17,7 @@ function robot(overrides: Partial<RobotView> = {}): RobotView {
     facing: 'East',
     arm_pose: { shoulder_angle: 0, elbow_angle: 0 },
     carrying: false,
+    role: { kind: 'Helper' },
     ...overrides,
   }
 }

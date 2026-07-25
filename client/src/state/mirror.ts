@@ -1,12 +1,14 @@
-import type { ConveyorView, RobotView, ServerMessage } from '../net/protocol'
+import type { ConveyorView, ProductView, RobotView, ServerMessage, StationView } from '../net/protocol'
 
 export interface MirrorState {
   conveyor: ConveyorView
   robots: Map<number, RobotView>
+  stations: StationView[]
+  products: Map<number, ProductView>
 }
 
 export function createEmptyMirror(): MirrorState {
-  return { conveyor: { running: false }, robots: new Map() }
+  return { conveyor: { running: false }, robots: new Map(), stations: [], products: new Map() }
 }
 
 /** 서버의 Snapshot/Delta 프로토콜을 그대로 재생하는 순수 함수. 입력
@@ -17,6 +19,8 @@ export function applyServerMessage(mirror: MirrorState, message: ServerMessage):
       return {
         conveyor: message.conveyor,
         robots: new Map(message.robots.map((r) => [r.id, r])),
+        stations: message.stations,
+        products: new Map(message.products.map((p) => [p.id, p])),
       }
     case 'Delta': {
       const robots = new Map(mirror.robots)
@@ -26,9 +30,18 @@ export function applyServerMessage(mirror: MirrorState, message: ServerMessage):
       for (const id of message.removed_robot_ids) {
         robots.delete(id)
       }
+      const products = new Map(mirror.products)
+      for (const product of message.changed_products) {
+        products.set(product.id, product)
+      }
+      for (const id of message.removed_product_ids) {
+        products.delete(id)
+      }
       return {
         conveyor: message.conveyor ?? mirror.conveyor,
         robots,
+        stations: message.stations.length > 0 ? message.stations : mirror.stations,
+        products,
       }
     }
     case 'ResumeAck':

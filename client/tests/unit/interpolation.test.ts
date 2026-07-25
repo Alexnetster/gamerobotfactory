@@ -16,12 +16,13 @@ function robot(id: number, x: number): RobotView {
     facing: 'East',
     arm_pose: { shoulder_angle: 0, elbow_angle: 0 },
     carrying: false,
+    role: { kind: 'Helper' },
   }
 }
 
 function mirrorWith(...robots: RobotView[]) {
   return applyServerMessage(createEmptyMirror(), {
-    kind: 'Snapshot', v: 1, tick: 1, session_id: 'abc', conveyor: { running: true }, robots,
+    kind: 'Snapshot', v: 1, tick: 1, session_id: 'abc', conveyor: { running: true }, robots, stations: [], products: [],
   })
 }
 
