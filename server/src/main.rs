@@ -16,9 +16,7 @@ use game_state::GameState;
 use metrics::{metrics_route, Metrics, MetricsHandle};
 use protocol::to_snapshot;
 use sim_core::grid::Grid;
-use sim_core::production::total_production;
 use sim_core::sim::{tick, SimState};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -75,14 +73,9 @@ async fn robot_failures(Extension(db): Extension<DbHandle>) -> impl IntoResponse
 }
 
 fn initial_state() -> SharedState {
-    // 9x7 — client/src/main.ts::GRID_SIZE와 정확히 같은 크기로 맞춘다.
-    // 예전엔 여기가 10x10이었는데, 클라이언트는 항상 자기 나름의 9x7
-    // 바닥만 그렸다(둘이 서로의 존재를 몰라 우연히 따로 정해진 값이었음)
-    // — 즉 로봇이 시각적으로 그려지지 않는 칸(x=9 또는 y=7,8,9)까지도
-    // 갈 수 있었던 잠재적 버그였다. 이제 그리드 크기가 실제로 일치하고,
-    // sim_core::sim::work_points가 컨베이어 벨트 칸으로 픽업/배치
-    // 지점을 고르므로(설계 결정: 벨트와 무관한 허공에서 화물이 나타났다
-    // 사라진다는 실사용 피드백) 클라이언트가 그리는 벨트와도 일치한다.
+    // 9x7 — client/src/main.ts::GRID_SIZE와 정확히 같은 크기(변경 없음).
+    // 로봇은 더 이상 여기서 스폰하지 않는다 — GameState::new가 조립
+    // 로봇 3대를 자동으로 만들고, 헬퍼는 SetRobotCount로 조절한다.
     let sim = SimState::new(Arc::new(Grid::new(9, 7)), Vec::new());
     Arc::new(Mutex::new(GameState::new(sim)))
 }
@@ -143,19 +136,17 @@ fn detect_status_transitions(
     events
 }
 
-/// 이전 틱과 이번 틱의 로봇별 `carrying` 값을 ID 기준으로 비교해, 방금
-/// 배치를 완료한(carrying: true -> false) 로봇 ID를 찾아낸다.
-/// `detect_status_transitions`와 같은 이유(실제 tick()/작업 사이클
-/// 타이밍 없이도 결정적으로 단위테스트하기 위함)로 순수 함수로 분리했다.
-fn detect_completed_placements(previous_robots: &[protocol::RobotView], current_robots: &[protocol::RobotView]) -> Vec<u32> {
-    let mut completed = Vec::new();
-    for current in current_robots {
-        let Some(previous) = previous_robots.iter().find(|p| p.id == current.id) else { continue };
-        if previous.carrying && !current.carrying {
-            completed.push(current.id);
-        }
-    }
-    completed
+/// 이전 틱과 이번 틱의 제품 id 목록을 비교해, 이번 틱에 반출(완성)된
+/// 제품 수를 센다 — 벨트 끝에 도달한 제품은 `sim_core::sim::plan_products`가
+/// 조용히 목록에서 제거하므로(설계문서 §5-3), "이전엔 있었는데 이번엔
+/// 없어진 id"가 곧 완성 이벤트다. `detect_status_transitions`와 같은
+/// 이유(실제 틱 타이밍 없이 결정적으로 단위테스트하기 위함)로 순수 함수로
+/// 분리했다.
+fn detect_completed_assemblies(previous_products: &[protocol::ProductView], current_products: &[protocol::ProductView]) -> usize {
+    previous_products
+        .iter()
+        .filter(|prev| !current_products.iter().any(|current| current.id == prev.id))
+        .count()
 }
 
 /// 백그라운드에서 20Hz로 시뮬레이션을 전진시키고, 마지막으로 브로드캐스트한
@@ -211,14 +202,17 @@ fn spawn_tick_loop(
                 let current_snapshot = to_snapshot(&guard, uuid::Uuid::nil());
                 let (delta, failure_events, total_production_value) = match (&last_snapshot, &current_snapshot) {
                     (
-                        protocol::ServerMessage::Snapshot { conveyor: prev_conveyor, robots: prev_robots, .. },
-                        protocol::ServerMessage::Snapshot { tick: cur_tick, conveyor: cur_conveyor, robots: cur_robots, .. },
+                        protocol::ServerMessage::Snapshot { conveyor: prev_conveyor, robots: prev_robots, products: prev_products, .. },
+                        protocol::ServerMessage::Snapshot {
+                            tick: cur_tick, conveyor: cur_conveyor, robots: cur_robots, stations: cur_stations, products: cur_products, ..
+                        },
                     ) => {
-                        let delta = compute_delta(*prev_conveyor, prev_robots, *cur_tick, *cur_conveyor, cur_robots);
+                        let delta = compute_delta(
+                            *prev_conveyor, prev_robots, prev_products, *cur_tick, *cur_conveyor, cur_robots, cur_stations, cur_products,
+                        );
                         let events = detect_status_transitions(prev_robots, cur_robots, *cur_tick);
-                        let completed = detect_completed_placements(prev_robots, cur_robots);
-                        let units: HashMap<u32, f32> = completed.iter().map(|&id| (id, sim_core::sim::UNIT_PER_CYCLE)).collect();
-                        let production = total_production(&guard.sim.robots, &units);
+                        let completed = detect_completed_assemblies(prev_products, cur_products);
+                        let production = completed as f32 * sim_core::sim::UNIT_PER_CYCLE;
                         (delta, events, production)
                     }
                     _ => (current_snapshot.clone(), Vec::new(), 0.0_f32),
@@ -407,7 +401,36 @@ mod tests {
             facing: protocol::WireDirection::East,
             arm_pose: protocol::WireArmPose { shoulder_angle: 0.0, elbow_angle: 0.0 },
             carrying: false,
+            role: protocol::WireRobotRole::Helper,
         }
+    }
+
+    fn sample_product_view(id: u32) -> protocol::ProductView {
+        protocol::ProductView { id, stage: 3, pos: protocol::WireCellId { x: 7, y: 3 } }
+    }
+
+    #[test]
+    fn detect_completed_assemblies_counts_products_that_disappeared() {
+        let previous = vec![sample_product_view(1), sample_product_view(2)];
+        let current = vec![sample_product_view(1)];
+
+        assert_eq!(detect_completed_assemblies(&previous, &current), 1);
+    }
+
+    #[test]
+    fn detect_completed_assemblies_is_zero_when_nothing_disappeared() {
+        let previous = vec![sample_product_view(1)];
+        let current = vec![sample_product_view(1)];
+
+        assert_eq!(detect_completed_assemblies(&previous, &current), 0);
+    }
+
+    #[test]
+    fn detect_completed_assemblies_ignores_brand_new_products() {
+        let previous: Vec<protocol::ProductView> = vec![];
+        let current = vec![sample_product_view(5)];
+
+        assert_eq!(detect_completed_assemblies(&previous, &current), 0);
     }
 
     #[test]
