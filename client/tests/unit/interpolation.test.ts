@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { computeRenderFactor, computeRenderRobots, TICK_DURATION_MS } from '../../src/state/interpolation'
+import { computeRenderFactor, computeRenderRobots, computeRenderProducts, TICK_DURATION_MS } from '../../src/state/interpolation'
 import { createEmptyMirror, applyServerMessage } from '../../src/state/mirror'
-import type { RobotView } from '../../src/net/protocol'
+import type { ProductView, RobotView } from '../../src/net/protocol'
 
 function robot(id: number, x: number): RobotView {
   return {
@@ -20,9 +20,19 @@ function robot(id: number, x: number): RobotView {
   }
 }
 
+function product(id: number, x: number): ProductView {
+  return { id, stage: 0, pos: { x, y: 0 } }
+}
+
 function mirrorWith(...robots: RobotView[]) {
   return applyServerMessage(createEmptyMirror(), {
     kind: 'Snapshot', v: 1, tick: 1, session_id: 'abc', conveyor: { running: true }, robots, stations: [], products: [],
+  })
+}
+
+function mirrorWithProducts(...products: ProductView[]) {
+  return applyServerMessage(createEmptyMirror(), {
+    kind: 'Snapshot', v: 1, tick: 1, session_id: 'abc', conveyor: { running: true }, robots: [], stations: [], products,
   })
 }
 
@@ -74,6 +84,53 @@ describe('computeRenderRobots', () => {
 
     // curr로부터 25ms 지남(=elapsed 75ms, factor 1.5) -> 2 + (2-0)*0.5 = 3
     const rendered = computeRenderRobots(prev, curr, 1125)
+
+    expect(rendered[0].renderPos.x).toBeCloseTo(3)
+  })
+})
+
+describe('computeRenderProducts', () => {
+  it('interpolates halfway between prev and curr positions', () => {
+    const prev = { mirror: mirrorWithProducts(product(1, 0)), receivedAtMs: 1000 }
+    const curr = { mirror: mirrorWithProducts(product(1, 2)), receivedAtMs: 1050 }
+
+    const rendered = computeRenderProducts(prev, curr, 1075) // 25ms into the 50ms window
+
+    expect(rendered[0].renderPos.x).toBeCloseTo(1)
+  })
+
+  it('shows a newly-appeared product at its curr position with no interpolation partner', () => {
+    const curr = { mirror: mirrorWithProducts(product(1, 3)), receivedAtMs: 1000 }
+
+    const rendered = computeRenderProducts(null, curr, 1000)
+
+    expect(rendered[0].renderPos).toEqual({ x: 3, y: 0 })
+  })
+
+  it('renders at exactly the prev position when factor is 0', () => {
+    const prev = { mirror: mirrorWithProducts(product(1, 0)), receivedAtMs: 1000 }
+    const curr = { mirror: mirrorWithProducts(product(1, 2)), receivedAtMs: 1050 }
+
+    const rendered = computeRenderProducts(prev, curr, 1050) // curr just received, elapsed = 0
+
+    expect(rendered[0].renderPos.x).toBeCloseTo(0)
+  })
+
+  it('renders at exactly the curr position when factor is 1', () => {
+    const prev = { mirror: mirrorWithProducts(product(1, 0)), receivedAtMs: 1000 }
+    const curr = { mirror: mirrorWithProducts(product(1, 2)), receivedAtMs: 1050 }
+
+    const rendered = computeRenderProducts(prev, curr, 1050 + TICK_DURATION_MS) // elapsed = TICK_DURATION_MS -> factor 1
+
+    expect(rendered[0].renderPos.x).toBeCloseTo(2)
+  })
+
+  it('extrapolates beyond curr when the next tick is late', () => {
+    const prev = { mirror: mirrorWithProducts(product(1, 0)), receivedAtMs: 1000 }
+    const curr = { mirror: mirrorWithProducts(product(1, 2)), receivedAtMs: 1050 }
+
+    // curr로부터 25ms 지남(=elapsed 75ms, factor 1.5) -> 2 + (2-0)*0.5 = 3
+    const rendered = computeRenderProducts(prev, curr, 1125)
 
     expect(rendered[0].renderPos.x).toBeCloseTo(3)
   })

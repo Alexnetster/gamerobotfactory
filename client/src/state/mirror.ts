@@ -40,6 +40,9 @@ export function applyServerMessage(mirror: MirrorState, message: ServerMessage):
       return {
         conveyor: message.conveyor ?? mirror.conveyor,
         robots,
+        // 서버가 매 Delta마다 항상 전체 스테이션 목록(3개)을 보내므로 보통 이 조건은
+        // 항상 참이지만, 빈 배열이 오는 예외적인 경우 기존 데이터를 잃지 않도록
+        // 방어적으로 유지한다.
         stations: message.stations.length > 0 ? message.stations : mirror.stations,
         products,
       }

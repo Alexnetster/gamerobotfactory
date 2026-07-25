@@ -144,6 +144,34 @@ describe('applyServerMessage', () => {
     expect(mirror.products.get(1)?.stage).toBe(0)
   })
 
+  test('keeps previous stations when Delta arrives with an empty stations array', () => {
+    let mirror = applyServerMessage(createEmptyMirror(), {
+      kind: 'Snapshot',
+      v: 1,
+      tick: 0,
+      session_id: 'x',
+      conveyor: { running: true },
+      robots: [],
+      stations: [{ index: 0, robot_cell: { x: 2, y: 2 }, part_inventory: 5 }],
+      products: [],
+    })
+
+    mirror = applyServerMessage(mirror, {
+      kind: 'Delta',
+      v: 1,
+      tick: 1,
+      conveyor: null,
+      changed_robots: [],
+      removed_robot_ids: [],
+      stations: [],
+      changed_products: [],
+      removed_product_ids: [],
+    })
+
+    expect(mirror.stations).toHaveLength(1)
+    expect(mirror.stations[0]).toEqual({ index: 0, robot_cell: { x: 2, y: 2 }, part_inventory: 5 })
+  })
+
   test('delta removes a product by id', () => {
     let mirror = applyServerMessage(createEmptyMirror(), {
       kind: 'Snapshot',
