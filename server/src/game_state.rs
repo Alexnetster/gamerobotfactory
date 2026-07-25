@@ -1,4 +1,4 @@
-use sim_core::sim::{Robot, RobotRole, RobotStatus, SimState, Task, REPAIR_TICKS};
+use sim_core::sim::{HELPER_SPAWN_STAGING_CELLS, Robot, RobotRole, RobotStatus, SimState, Task, REPAIR_TICKS};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Conveyor {
@@ -81,6 +81,13 @@ impl GameState {
     /// 그대로(조립 로봇 3대를 더한 총 로봇 수가 아니라 헬퍼 수 자체에
     /// 적용). 몇 대를 추가/제거할지 시작 시점에 한 번만 계산해 두므로
     /// 반복마다 `filter().count()`를 다시 돌지 않는다.
+    ///
+    /// 새 헬퍼는 `WAREHOUSE_CELL` 자체가 아니라
+    /// `HELPER_SPAWN_STAGING_CELLS`의 칸들로 분산 스폰한다 —
+    /// `WAREHOUSE_CELL`에 그대로 스폰하면 배정 못 받고 남는 유휴 헬퍼가
+    /// 그 칸을 영구 점거해서 실제 픽업을 하러 그 칸에 와야 하는 다른
+    /// 헬퍼를 영원히 막는 배포 정지 버그가 있었다(자세한 이유는
+    /// `sim.rs::HELPER_SPAWN_STAGING_CELLS`의 doc 주석 참고).
     pub fn set_robot_count(&mut self, target: usize) {
         let target = target.clamp(1, MAX_ROBOT_COUNT);
         let current = self.sim.robots.iter().filter(|r| r.role == RobotRole::Helper).count();
@@ -89,7 +96,8 @@ impl GameState {
             for _ in 0..(target - current) {
                 let id = self.next_robot_id;
                 self.next_robot_id += 1;
-                self.sim.robots.push(Robot::new(id, sim_core::sim::WAREHOUSE_CELL, sim_core::sim::WAREHOUSE_CELL));
+                let spawn_cell = HELPER_SPAWN_STAGING_CELLS[id as usize % HELPER_SPAWN_STAGING_CELLS.len()];
+                self.sim.robots.push(Robot::new(id, spawn_cell, spawn_cell));
             }
         } else {
             for _ in 0..(current - target) {
@@ -205,6 +213,48 @@ mod tests {
         assert_eq!(helper_robots(&state).len(), 3);
         state.set_robot_count(1);
         assert_eq!(helper_robots(&state).len(), 1);
+    }
+
+    #[test]
+    fn set_robot_count_growth_never_spawns_a_new_helper_on_the_warehouse_cell() {
+        // 회귀: 예전엔 새 헬퍼를 전부 WAREHOUSE_CELL에 스폰해서, 배정
+        // 못 받고 남는 유휴 헬퍼가 그 칸을 영구 점거하며 실제 픽업을
+        // 하러 그 칸에 와야 하는 다른 헬퍼를 막는 배포 정지 버그가
+        // 있었다(sim.rs::HELPER_SPAWN_STAGING_CELLS 문서 참고). 여기서는
+        // 스폰 위치 자체가 그 칸을 피하는지만 빠르게 확인한다 — 실제
+        // 데드락 시나리오 자체는 sim.rs의 sim_core 레벨 테스트가 검증한다.
+        let mut state = empty_state();
+        state.set_robot_count(10);
+
+        for robot in helper_robots(&state) {
+            assert_ne!(
+                robot.pos,
+                sim_core::sim::WAREHOUSE_CELL,
+                "newly spawned helper {} must not spawn exactly on WAREHOUSE_CELL",
+                robot.id
+            );
+        }
+    }
+
+    #[test]
+    fn set_robot_count_growth_spreads_simultaneously_spawned_helpers_across_distinct_cells() {
+        // 배열 길이만큼 한 번에 스폰돼도(가장 빡빡한 경우) 서로 다른 칸에
+        // 떨어져야 한다 — 다 같은 칸에 몰리면 그 칸에서 이 문제가 그대로
+        // 재발한다(WAREHOUSE_CELL만 피하면 끝이 아님, HELPER_SPAWN_STAGING_CELLS
+        // 문서의 "겹쳐도 안전한 이유" 참고와는 별개로 애초에 안 겹치는 게
+        // 더 낫다).
+        let mut state = empty_state();
+        state.set_robot_count(HELPER_SPAWN_STAGING_CELLS.len());
+
+        let positions: Vec<_> = helper_robots(&state).iter().map(|r| r.pos).collect();
+        let mut unique = positions.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            positions.len(),
+            unique.len(),
+            "simultaneously spawned helpers should not pile onto the same cell: {positions:?}"
+        );
     }
 
     #[test]

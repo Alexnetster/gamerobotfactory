@@ -37,6 +37,39 @@ pub const BELT_END_X: i32 = 7; // 이 칸에 도달한 제품은 반출(완성)�
 pub const STATION_XS: [i32; STATION_COUNT] = [2, 4, 6];
 pub const STATION_ROBOT_ROW: i32 = 2; // 벨트(y=3) 바로 위, 벨트 칸이 아님
 pub const WAREHOUSE_CELL: CellId = (4, 0); // 헬퍼 로봇의 대표 출발/도착 칸(창고 구역 y=0..=1 중 하나)
+
+/// 새로 스폰되는 헬퍼가 유휴 상태로 서 있을 수 있는 칸들(창고 구역
+/// y=0..=1 안, `WAREHOUSE_CELL` 자체와는 다른 칸). 실제 픽업/드롭 거래는
+/// 여전히 `WAREHOUSE_CELL` 하나만 쓴다 — 이 배열은 오직 "새로 만들어진
+/// 헬퍼가 처음에 어디 서 있는가"만 바꾼다.
+///
+/// 왜 필요한가: `plan_helper`는 `helper_assignment == None`인(아직 아무
+/// 작업도 배정 못 받은) 헬퍼를 완전히 가만히 둔다(절대 이동하지 않음,
+/// 아래 참고). `game_state.rs::set_robot_count`로 헬퍼가 여러 대 추가돼도
+/// 동시에 대기 중인 작업은 보통 하나뿐이라(스테이션 `STATION_COUNT`개 +
+/// `DeliverFrame` 하나), 헬퍼 수가 대기 작업 수보다 많아지면 나머지는
+/// 영구히 유휴 상태로 남는다. 예전엔 이 유휴 헬퍼들을 전부
+/// `WAREHOUSE_CELL` 자체에 스폰했는데, 그 칸은 활성 헬퍼가 실제 픽업을
+/// 하러 반드시 도달해야 하는 칸이다 — `find_path`는 목표 칸이 점유돼
+/// 있어도 그쪽으로 향하는 경로 자체는 허용하지만(pathfind.rs 참고, "그
+/// 로봇이 다음 틱에 비킬 수도 있으므로"), `advance_along_path`의 마지막
+/// 한 칸 진입은 여전히 `!occupied.contains(&next_cell)`로 막힌다 — 유휴
+/// 헬퍼가 `WAREHOUSE_CELL`을 영구 점거하면 그 마지막 한 칸이 영원히
+/// 열리지 않아 활성 헬퍼가 도착 직전에서 영원히 멈추고, 그 헬퍼가 물고
+/// 있던 작업이 끝나지 않으니 라인 전체가 멈춘다(실측된 배포 정지 버그,
+/// `6576653` 커밋을 bisect해서 확인). 스폰 위치만 이 배열로 분산시키면
+/// 유휴 헬퍼끼리는 서로 몇 명이 겹쳐도(트랜잭션 칸이 아니므로) 문제가
+/// 없다.
+///
+/// `set_robot_count`가 새로 배정하는 로봇 id를 이 배열 길이로 나눈
+/// 나머지로 인덱싱해서 스폰 칸을 고른다 — id는 항상 증가만 하므로(재사용
+/// 없음, `set_robot_count_assigns_unique_growing_ids` 테스트가 이미
+/// 보장) 한 번의 `set_robot_count` 호출로 여러 대가 한꺼번에 스폰돼도
+/// 이 배열 길이만큼은 서로 겹치지 않는다. 그 이상(예: 배열 길이보다 많은
+/// 헬퍼가 한 번에 스폰되거나, `MAX_ROBOT_COUNT`에 가까운 극단적으로 많은
+/// 헬퍼 수) 겹치는 건 감수한다 — 겹쳐도 문제되는 칸은 여전히
+/// `WAREHOUSE_CELL` 자체뿐이고, 그 칸은 이 배열에 없으므로 안전하다.
+pub const HELPER_SPAWN_STAGING_CELLS: [CellId; 6] = [(0, 0), (2, 0), (6, 0), (8, 0), (1, 1), (7, 1)];
 pub const STATION_MAX_INVENTORY: u32 = 5;
 pub const ASSEMBLY_TICKS: u32 = 20; // 조립 로봇의 스테이션당 작업 시간 — 튜닝 대상
 pub const HELPER_PICKUP_TICKS: u32 = 20; // 헬퍼가 창고에서 집어드는 시간 — 튜닝 대상
@@ -1261,6 +1294,62 @@ mod tests {
         assert_eq!(
             state.stations[2].part_inventory, STATION_MAX_INVENTORY,
             "원래부터 가득 차 있던 스테이션 2는 그대로 유지돼야 한다"
+        );
+    }
+
+    #[test]
+    fn multiple_simultaneously_idle_helpers_do_not_permanently_block_a_helper_returning_to_the_warehouse_cell() {
+        // 실제로 있었던 배포 정지 버그의 sim_core 레벨 회귀 테스트
+        // (bisected to commit 6576653). 예전엔 `set_robot_count`의 성장
+        // 분기가 새 헬퍼를 전부 `WAREHOUSE_CELL` 자체에 스폰했다. 유휴
+        // (`helper_assignment == None`) 헬퍼는 `plan_helper`가 절대
+        // 움직이지 않으므로, 헬퍼 수가 동시 대기 작업 수보다 많아지면
+        // 남는 헬퍼들이 `WAREHOUSE_CELL`을 영구 점거했다 — `find_path`는
+        // 목표 칸이 점유돼 있어도 그쪽으로 향하는 경로 자체는 허용하지만
+        // (pathfind.rs 참고), `advance_along_path`의 마지막 한 칸 진입은
+        // `!occupied.contains(&next_cell)`로 막혀서, 실제 픽업을 하러 그
+        // 칸에 도착해야 하는 활성 헬퍼가 도착 직전에서 영원히 멈췄다.
+        //
+        // 지금은 `set_robot_count`가 새 헬퍼를 `HELPER_SPAWN_STAGING_CELLS`
+        // (WAREHOUSE_CELL 자체는 피함)로 분산 스폰한다 — 이 테스트는 그
+        // 스폰 규칙을 그대로 재현해서(id를 배열 길이로 나눈 나머지로
+        // 인덱싱, `set_robot_count`와 완전히 같은 방식) 여러 헬퍼가
+        // 동시에 유휴 상태로 남아 있어도, 실제 배정을 받아 창고까지
+        // 가야 하는 헬퍼가 끝내 도착해서 스테이션을 채우는지 검증한다.
+        //
+        // 뮤테이션 테스트로 실측: 아래 `idle_cell_for`가 `WAREHOUSE_CELL`을
+        // 반환하도록(예전 버그처럼) 일시적으로 바꿔봤더니 이 테스트가
+        // 2000틱 안에 restocked==false로 실패하는 것을 확인했다 — 즉 이
+        // 테스트는 실제로 이 회귀를 잡아낸다(공허한 테스트가 아님).
+        let idle_cell_for = |id: u32| HELPER_SPAWN_STAGING_CELLS[id as usize % HELPER_SPAWN_STAGING_CELLS.len()];
+
+        // "mover" — 창고에서 멀리 떨어진 곳에서 시작하고 id가 가장 낮아
+        // FIFO 배정 1순위(run_helper_logistics의 robot_id 오름차순
+        // 규칙)라서, 아래 고갈된 스테이션의 RestockStation 작업을 반드시
+        // 이 로봇이 받는다 — 그래서 실제로 WAREHOUSE_CELL까지 이동해야
+        // 하는 상황이 보장된다.
+        let mut robots = vec![Robot::new(1, (0, 6), (0, 6))];
+        for id in [2u32, 3, 4, 5] {
+            let cell = idle_cell_for(id);
+            robots.push(Robot::new(id, cell, cell));
+        }
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), robots);
+        state.stations[0].part_inventory = 0;
+
+        let mut restocked = false;
+        for _ in 0..2000 {
+            state = tick(&state, true);
+            if state.stations[0].part_inventory == STATION_MAX_INVENTORY {
+                restocked = true;
+                break;
+            }
+        }
+
+        assert!(
+            restocked,
+            "여러 헬퍼가 창고 대기 칸들에 동시에 유휴 상태로 남아 있어도, 배정받은 헬퍼가 결국 \
+             WAREHOUSE_CELL까지 도달해 스테이션을 채워야 한다(유휴 헬퍼가 WAREHOUSE_CELL 자체를 \
+             점거해 막는 회귀가 생기면 여기서 영원히 채워지지 않는다)"
         );
     }
 }
