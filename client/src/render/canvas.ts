@@ -215,9 +215,15 @@ function drawProduct(ctx: CanvasRenderingContext2D, product: InterpolatedProduct
   ctx.lineTo(-7, 4)
   ctx.stroke()
 
-  // 배터리(stage >= 1)
+  // 배터리(stage >= 1). 로봇이 물건을 들었을 때 그리는 화물 아이콘
+  // (drawRobot, 아래 `if (robot.carrying)` 블록)과 우연히 같은 색(#c9762f)을
+  // 썼다가, 그 색만으로 "이 로봇이 carrying인지"를 판정하던 E2E 테스트
+  // (`client/tests/e2e/render.spec.ts`)가 벨트 위 아무 제품이나 stage>=1이
+  // 되는 순간 캔버스 어딘가에 같은 색이 나타나 오탐하는 실제 버그로
+  // 이어졌다(Task 10 전체 회귀 검증 중 발견 — 3회 연속 재현) — 배터리는
+  // 화물 아이콘과 확실히 구분되는 색으로 바꾼다.
   if (product.stage >= 1) {
-    ctx.fillStyle = '#c9762f'
+    ctx.fillStyle = '#2f7fc9'
     ctx.strokeStyle = '#1c2024'
     ctx.lineWidth = 1
     ctx.fillRect(-4, -3, 8, 6)
