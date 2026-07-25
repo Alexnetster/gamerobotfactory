@@ -1,4 +1,4 @@
-use sim_core::sim::{Robot, RobotStatus, SimState, Task, REPAIR_TICKS};
+use sim_core::sim::{Robot, RobotRole, RobotStatus, SimState, Task, REPAIR_TICKS};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Conveyor {
@@ -47,36 +47,65 @@ pub const MAX_ROBOT_COUNT: usize = 200;
 impl GameState {
     pub fn new(sim: SimState) -> Self {
         let next_robot_id = sim.robots.iter().map(|r| r.id).max().map_or(0, |max| max + 1);
-        GameState { sim, conveyor: Conveyor::new(), selected_robot: None, next_robot_id }
+        let mut state = GameState { sim, conveyor: Conveyor::new(), selected_robot: None, next_robot_id };
+        state.ensure_assembly_robots_exist();
+        state
+    }
+
+    /// 조립 로봇이 하나도 없으면(=새 게임 시작) 스테이션 수만큼(3대) 자동
+    /// 생성한다. 이미 있으면(예: 향후 영속화된 상태를 복원하는 경우) 다시
+    /// 만들지 않는다 — 멱등. 사용자가 조절할 수 없다(설계문서 §4) —
+    /// `set_robot_count`는 헬퍼만 다룬다.
+    fn ensure_assembly_robots_exist(&mut self) {
+        let has_assembly = self.sim.robots.iter().any(|r| matches!(r.role, RobotRole::Assembly { .. }));
+        if has_assembly {
+            return;
+        }
+        for station in self.sim.stations.clone() {
+            let id = self.next_robot_id;
+            self.next_robot_id += 1;
+            let mut robot = Robot::new(id, station.robot_cell, station.robot_cell);
+            robot.role = RobotRole::Assembly { station_index: station.index };
+            self.sim.robots.push(robot);
+        }
     }
 
     pub fn toggle_conveyor(&mut self) {
         self.conveyor.running = !self.conveyor.running;
     }
 
-    /// 로봇 대수를 정확히 `target`대로 맞춘다(단 `MAX_ROBOT_COUNT`로
-    /// 클램프). 늘려야 하면 그리드 원점 근처의 빈 칸에 새 로봇을
-    /// 스폰하고(자기 자신을 목표로 삼아 제자리 대기), 줄여야 하면 ID가
-    /// 가장 큰 로봇부터 제거한다.
+    /// 헬퍼 로봇 대수를 정확히 `target`대로 맞춘다(조립 로봇 3대는
+    /// 여기서 건드리지 않는다 — 설계문서 §4). 하한 1을 강제한다(설계문서
+    /// §6) — 0명이 되면 재고가 바닥난 스테이션을 영영 못 채워 라인
+    /// 전체가 회복 불가능하게 멈추기 때문. 상한은 기존 `MAX_ROBOT_COUNT`
+    /// 그대로(조립 로봇 3대를 더한 총 로봇 수가 아니라 헬퍼 수 자체에
+    /// 적용). 몇 대를 추가/제거할지 시작 시점에 한 번만 계산해 두므로
+    /// 반복마다 `filter().count()`를 다시 돌지 않는다.
     pub fn set_robot_count(&mut self, target: usize) {
-        let target = target.min(MAX_ROBOT_COUNT);
-        while self.sim.robots.len() < target {
-            let id = self.next_robot_id;
-            self.next_robot_id += 1;
-            let spawn_at = (0, 0);
-            self.sim.robots.push(Robot::new(id, spawn_at, spawn_at));
-        }
-        while self.sim.robots.len() > target {
-            if let Some((index, _)) = self
-                .sim
-                .robots
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, r)| r.id)
-            {
-                self.sim.robots.remove(index);
+        let target = target.clamp(1, MAX_ROBOT_COUNT);
+        let current = self.sim.robots.iter().filter(|r| r.role == RobotRole::Helper).count();
+
+        if current < target {
+            for _ in 0..(target - current) {
+                let id = self.next_robot_id;
+                self.next_robot_id += 1;
+                self.sim.robots.push(Robot::new(id, sim_core::sim::WAREHOUSE_CELL, sim_core::sim::WAREHOUSE_CELL));
+            }
+        } else {
+            for _ in 0..(current - target) {
+                if let Some((index, _)) = self
+                    .sim
+                    .robots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.role == RobotRole::Helper)
+                    .max_by_key(|(_, r)| r.id)
+                {
+                    self.sim.robots.remove(index);
+                }
             }
         }
+
         if let Some(selected) = self.selected_robot {
             if !self.sim.robots.iter().any(|r| r.id == selected) {
                 self.selected_robot = None;
@@ -155,6 +184,10 @@ mod tests {
         GameState::new(SimState::new(Arc::new(Grid::new(5, 5)), Vec::new()))
     }
 
+    fn helper_robots(state: &GameState) -> Vec<&Robot> {
+        state.sim.robots.iter().filter(|r| r.role == RobotRole::Helper).collect()
+    }
+
     #[test]
     fn toggle_conveyor_flips_running_state() {
         let mut state = empty_state();
@@ -169,16 +202,45 @@ mod tests {
     fn set_robot_count_grows_and_shrinks() {
         let mut state = empty_state();
         state.set_robot_count(3);
-        assert_eq!(state.sim.robots.len(), 3);
+        assert_eq!(helper_robots(&state).len(), 3);
         state.set_robot_count(1);
-        assert_eq!(state.sim.robots.len(), 1);
+        assert_eq!(helper_robots(&state).len(), 1);
     }
 
     #[test]
     fn set_robot_count_clamps_to_max() {
         let mut state = empty_state();
         state.set_robot_count(usize::MAX);
-        assert_eq!(state.sim.robots.len(), MAX_ROBOT_COUNT);
+        assert_eq!(helper_robots(&state).len(), MAX_ROBOT_COUNT);
+    }
+
+    #[test]
+    fn set_robot_count_never_goes_below_one_helper() {
+        let mut state = empty_state();
+        state.set_robot_count(5);
+        state.set_robot_count(0);
+        assert_eq!(helper_robots(&state).len(), 1, "헬퍼는 최소 1명이어야 한다");
+    }
+
+    #[test]
+    fn game_state_new_always_creates_exactly_station_count_assembly_robots() {
+        let state = empty_state();
+        let assembly_count =
+            state.sim.robots.iter().filter(|r| matches!(r.role, RobotRole::Assembly { .. })).count();
+        assert_eq!(assembly_count, sim_core::sim::STATION_COUNT);
+    }
+
+    #[test]
+    fn set_robot_count_never_removes_an_assembly_robot() {
+        let mut state = empty_state();
+        state.set_robot_count(0);
+        let assembly_count =
+            state.sim.robots.iter().filter(|r| matches!(r.role, RobotRole::Assembly { .. })).count();
+        assert_eq!(
+            assembly_count,
+            sim_core::sim::STATION_COUNT,
+            "set_robot_count(0)이어도 조립 로봇은 그대로 남아야 한다"
+        );
     }
 
     #[test]
@@ -204,7 +266,7 @@ mod tests {
 
         state.set_robot_count(1);
 
-        let remaining_ids: Vec<u32> = state.sim.robots.iter().map(|r| r.id).collect();
+        let remaining_ids: Vec<u32> = helper_robots(&state).iter().map(|r| r.id).collect();
         assert_eq!(remaining_ids, vec![2], "the highest-id robot (5) should be removed, not the last Vec element");
     }
 
@@ -212,7 +274,7 @@ mod tests {
     fn select_robot_rejects_unknown_id() {
         let mut state = empty_state();
         state.set_robot_count(1);
-        let unknown_id = state.sim.robots[0].id + 100;
+        let unknown_id = helper_robots(&state)[0].id + 100;
         assert_eq!(state.select_robot(unknown_id), Err(CommandError::RobotNotFound(unknown_id)));
     }
 
@@ -220,7 +282,7 @@ mod tests {
     fn select_then_release_clears_selection() {
         let mut state = empty_state();
         state.set_robot_count(1);
-        let id = state.sim.robots[0].id;
+        let id = helper_robots(&state)[0].id;
         state.select_robot(id).unwrap();
         assert_eq!(state.selected_robot, Some(id));
         state.release_robot();
@@ -229,11 +291,16 @@ mod tests {
 
     #[test]
     fn removing_selected_robot_clears_selection() {
+        // NOTE: set_robot_count now floors at 1 helper (design §6), so
+        // shrinking from 1 -> 0 no longer removes anything. To actually
+        // exercise "the selected robot gets removed", select the
+        // highest-id helper out of 2 and shrink to 1 (shrink always
+        // removes the highest-id helper).
         let mut state = empty_state();
-        state.set_robot_count(1);
-        let id = state.sim.robots[0].id;
+        state.set_robot_count(2);
+        let id = helper_robots(&state)[1].id;
         state.select_robot(id).unwrap();
-        state.set_robot_count(0);
+        state.set_robot_count(1);
         assert_eq!(state.selected_robot, None);
     }
 
@@ -241,10 +308,10 @@ mod tests {
     fn trigger_arm_action_sets_task_on_the_right_robot() {
         let mut state = empty_state();
         state.set_robot_count(2);
-        let target_id = state.sim.robots[1].id;
+        let target_id = helper_robots(&state)[1].id;
         state.trigger_arm_action(target_id, Task::Picking).unwrap();
-        assert_eq!(state.sim.robots[0].task, Task::Idle);
-        assert_eq!(state.sim.robots[1].task, Task::Picking);
+        assert_eq!(helper_robots(&state)[0].task, Task::Idle);
+        assert_eq!(helper_robots(&state)[1].task, Task::Picking);
     }
 
     #[test]
@@ -258,8 +325,8 @@ mod tests {
     fn trigger_arm_action_rejects_non_operational_robot() {
         let mut state = empty_state();
         state.set_robot_count(1);
-        let id = state.sim.robots[0].id;
-        state.sim.robots[0].status = RobotStatus::Failed;
+        let id = helper_robots(&state)[0].id;
+        state.sim.robots.iter_mut().find(|r| r.id == id).unwrap().status = RobotStatus::Failed;
 
         let err = state.trigger_arm_action(id, Task::Picking);
 
@@ -270,19 +337,22 @@ mod tests {
     fn repair_robot_transitions_a_failed_robot_to_repairing() {
         let mut state = empty_state();
         state.set_robot_count(1);
-        let id = state.sim.robots[0].id;
-        state.sim.robots[0].status = RobotStatus::Failed;
+        let id = helper_robots(&state)[0].id;
+        state.sim.robots.iter_mut().find(|r| r.id == id).unwrap().status = RobotStatus::Failed;
 
         state.repair_robot(id).unwrap();
 
-        assert_eq!(state.sim.robots[0].status, RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS });
+        assert_eq!(
+            state.sim.robots.iter().find(|r| r.id == id).unwrap().status,
+            RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS }
+        );
     }
 
     #[test]
     fn repair_robot_rejects_a_non_failed_robot() {
         let mut state = empty_state();
         state.set_robot_count(1);
-        let id = state.sim.robots[0].id;
+        let id = helper_robots(&state)[0].id;
 
         let err = state.repair_robot(id);
 
@@ -300,16 +370,31 @@ mod tests {
     fn repair_all_failed_robots_repairs_only_the_failed_ones_and_counts_them() {
         let mut state = empty_state();
         state.set_robot_count(3);
-        state.sim.robots[0].status = RobotStatus::Failed;
-        state.sim.robots[1].status = RobotStatus::Operational;
-        state.sim.robots[2].status = RobotStatus::Failed;
+        // NOTE: with 3 Assembly robots always occupying indices 0..3,
+        // `state.sim.robots[0..3]` would silently hit Assembly robots
+        // instead of the 3 helpers this test means to target — resolve
+        // by id via `helper_robots` instead of by raw index.
+        let ids: Vec<u32> = helper_robots(&state).iter().map(|r| r.id).collect();
+        state.sim.robots.iter_mut().find(|r| r.id == ids[0]).unwrap().status = RobotStatus::Failed;
+        state.sim.robots.iter_mut().find(|r| r.id == ids[1]).unwrap().status = RobotStatus::Operational;
+        state.sim.robots.iter_mut().find(|r| r.id == ids[2]).unwrap().status = RobotStatus::Failed;
 
         let repaired = state.repair_all_failed_robots();
 
         assert_eq!(repaired, 2);
-        assert_eq!(state.sim.robots[0].status, RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS });
-        assert_eq!(state.sim.robots[1].status, RobotStatus::Operational, "an already-Operational robot must be left alone");
-        assert_eq!(state.sim.robots[2].status, RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS });
+        assert_eq!(
+            state.sim.robots.iter().find(|r| r.id == ids[0]).unwrap().status,
+            RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS }
+        );
+        assert_eq!(
+            state.sim.robots.iter().find(|r| r.id == ids[1]).unwrap().status,
+            RobotStatus::Operational,
+            "an already-Operational robot must be left alone"
+        );
+        assert_eq!(
+            state.sim.robots.iter().find(|r| r.id == ids[2]).unwrap().status,
+            RobotStatus::Repairing { remaining_ticks: REPAIR_TICKS }
+        );
     }
 
     #[test]
@@ -329,8 +414,8 @@ mod tests {
         // 상태를 보고 RepairRobot 대상으로 지정할 수 있다.
         let mut state = empty_state();
         state.set_robot_count(1);
-        let id = state.sim.robots[0].id;
-        state.sim.robots[0].status = RobotStatus::Failed;
+        let id = helper_robots(&state)[0].id;
+        state.sim.robots.iter_mut().find(|r| r.id == id).unwrap().status = RobotStatus::Failed;
 
         state.select_robot(id).unwrap();
 
@@ -343,7 +428,7 @@ mod tests {
         // 복구 중인 로봇도 ID가 가장 크면 그대로 제거 대상이다.
         let mut state = empty_state();
         state.set_robot_count(2);
-        let highest_id = state.sim.robots.iter().map(|r| r.id).max().unwrap();
+        let highest_id = helper_robots(&state).iter().map(|r| r.id).max().unwrap();
         state
             .sim
             .robots
