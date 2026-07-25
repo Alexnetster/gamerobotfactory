@@ -216,7 +216,16 @@ mod tests {
     use tokio::sync::broadcast;
 
     fn sample_message(tick: u64) -> ServerMessage {
-        ServerMessage::Delta { v: 1, tick, conveyor: None, changed_robots: vec![], removed_robot_ids: vec![] }
+        ServerMessage::Delta {
+            v: 1,
+            tick,
+            conveyor: None,
+            changed_robots: vec![],
+            removed_robot_ids: vec![],
+            stations: vec![],
+            changed_products: vec![],
+            removed_product_ids: vec![],
+        }
     }
 
     #[test]
