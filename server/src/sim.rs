@@ -31,6 +31,21 @@ pub const UNIT_PER_CYCLE: f32 = 1.0; // 배치 1회 완료당 생산량 — main
 const PICKUP_SEED: u64 = 0;
 const PLACE_SEED: u64 = 1;
 
+// 조립 라인 레이아웃(설계문서 §1) — 그리드(9x7, main.rs::initial_state와 일치)
+// 가운데 가로줄이 벨트, 그 위 칸이 창고 구역. 값 자체는 이 레이아웃
+// 하나로 고정이라 튜닝 대상이 아니다(그리드 크기가 바뀌면 같이 재검토).
+pub const STATION_COUNT: usize = 3;
+pub const BELT_ROW: i32 = 3;
+pub const BELT_START_X: i32 = 1;
+pub const BELT_END_X: i32 = 7; // 이 칸에 도달한 제품은 반출(완성)되어 다음 틱에 사라진다
+pub const STATION_XS: [i32; STATION_COUNT] = [2, 4, 6];
+pub const STATION_ROBOT_ROW: i32 = 2; // 벨트(y=3) 바로 위, 벨트 칸이 아님
+pub const WAREHOUSE_CELL: CellId = (4, 0); // 헬퍼 로봇의 대표 출발/도착 칸(창고 구역 y=0..=1 중 하나)
+pub const STATION_MAX_INVENTORY: u32 = 5;
+pub const ASSEMBLY_TICKS: u32 = 20; // 조립 로봇의 스테이션당 작업 시간 — 튜닝 대상
+pub const HELPER_PICKUP_TICKS: u32 = 20; // 헬퍼가 창고에서 집어드는 시간 — 튜닝 대상
+pub const HELPER_DROP_TICKS: u32 = 20; // 헬퍼가 목적지에 내려놓는 시간 — 튜닝 대상
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BodyPose {
     Standing,
@@ -95,6 +110,21 @@ pub enum RobotStatus {
     Repairing { remaining_ticks: u32 },
 }
 
+/// 로봇의 역할(설계문서 §4) — `Assembly`는 `station_index`가 가리키는
+/// 스테이션 옆에 고정되어 절대 이동하지 않는다. `Helper`는 창고와
+/// 스테이션/라인 시작점 사이를 오간다. 기본값은 `Helper`(아래
+/// `Robot::new`) — 조립 로봇 3대는 `game_state.rs`(Task 4)가 스폰 직후
+/// 명시적으로 `role`을 덮어써서 만든다. `Robot::new`의 시그니처를 바꾸지
+/// 않는 이유: 이 필드를 생성자 파라미터로 추가하면 기존 호출부
+/// 수십 곳(모든 테스트 포함)이 전부 깨지는데, 그 호출부 대부분은 role과
+/// 무관한 걸(마모/고장/이동 충돌 등) 검증하는 테스트라 다 고칠 가치가
+/// 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RobotRole {
+    Assembly { station_index: u8 },
+    Helper,
+}
+
 #[derive(Debug, Clone)]
 pub struct Robot {
     pub id: u32,
@@ -109,6 +139,7 @@ pub struct Robot {
     pub facing: Direction,
     pub carrying: bool,
     pub work_ticks_remaining: u32,
+    pub role: RobotRole,
 }
 
 impl Robot {
@@ -126,6 +157,7 @@ impl Robot {
             facing: Direction::East,
             carrying: false,
             work_ticks_remaining: 0,
+            role: RobotRole::Helper,
         }
     }
 
@@ -185,11 +217,71 @@ fn update_status(mut robot: Robot, tick_count: u64) -> Robot {
     robot
 }
 
+/// 벨트 위를 흐르는 제품(드론) — 설계문서 §2. `stage`는 지금까지 통과한
+/// 스테이션 수(0=빈 프레임, 3=완성). `work_ticks_remaining > 0`이면
+/// 지금 스테이션에 정지해 조립 카운트다운 중 — 로봇의 같은 이름 필드와
+/// 똑같은 의미(0이면 이동 가능, 0보다 크면 제자리).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Product {
+    pub id: u32,
+    pub stage: u8,
+    pub pos: CellId,
+    pub work_ticks_remaining: u32,
+}
+
+impl Product {
+    pub fn new(id: u32, pos: CellId) -> Self {
+        Product { id, stage: 0, pos, work_ticks_remaining: 0 }
+    }
+}
+
+/// 조립 스테이션(설계문서 §3) — `belt_cell`이 제품이 실제로 멈추는 칸,
+/// `robot_cell`이 그 옆에 고정된 조립 로봇의 자리. `index`가 `STATION_XS`의
+/// 인덱스이자, 제품의 `stage`와 대응한다(스테이션 N은 stage==N인 제품만
+/// 처리하고 그 결과 stage를 N+1로 올린다).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Station {
+    pub index: u8,
+    pub robot_cell: CellId,
+    pub belt_cell: CellId,
+    pub part_inventory: u32,
+}
+
+impl Station {
+    pub fn new(index: u8) -> Self {
+        let x = STATION_XS[index as usize];
+        Station {
+            index,
+            robot_cell: (x, STATION_ROBOT_ROW),
+            belt_cell: (x, BELT_ROW),
+            part_inventory: STATION_MAX_INVENTORY,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SimState {
     pub grid: Arc<Grid>,
     pub robots: Vec<Robot>,
+    pub products: Vec<Product>,
+    pub stations: Vec<Station>,
     pub tick_count: u64,
+}
+
+impl SimState {
+    /// 스테이션 3개(항상 `STATION_COUNT`개, 전부 재고 가득 참)로
+    /// 초기화된 새 상태를 만든다 — 대부분의 생성 코드는 제품 없이
+    /// `tick_count: 0`으로 시작하므로, 매번 이 보일러플레이트를 반복하는
+    /// 대신 이 생성자 하나로 통일한다.
+    pub fn new(grid: Arc<Grid>, robots: Vec<Robot>) -> Self {
+        SimState {
+            grid,
+            robots,
+            products: Vec::new(),
+            stations: (0..STATION_COUNT as u8).map(Station::new).collect(),
+            tick_count: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -249,7 +341,13 @@ pub fn tick(state: &SimState, conveyor_running: bool) -> SimState {
         })
         .collect();
 
-    SimState { grid: state.grid.clone(), robots: new_robots, tick_count: state.tick_count + 1 }
+    SimState {
+        grid: state.grid.clone(),
+        robots: new_robots,
+        products: state.products.clone(),
+        stations: state.stations.clone(),
+        tick_count: state.tick_count + 1,
+    }
 }
 
 /// 로봇 id로부터 결정적으로 계산되는 순찰 지점 두 개. 그리드 폭/높이 중
@@ -461,7 +559,7 @@ mod tests {
     use super::*;
 
     fn simple_state(width: i32, height: i32) -> SimState {
-        SimState { grid: Arc::new(Grid::new(width, height)), robots: Vec::new(), tick_count: 0 }
+        SimState::new(Arc::new(Grid::new(width, height)), Vec::new())
     }
 
     #[test]
@@ -864,7 +962,7 @@ mod tests {
     fn full_work_cycle_moves_to_pickup_picks_up_carries_and_places() {
         let grid = Arc::new(Grid::new(10, 10));
         let (pickup, place) = work_points(7, &grid);
-        let mut state = SimState { grid: grid.clone(), robots: vec![Robot::new(7, pickup, pickup)], tick_count: 0 };
+        let mut state = SimState::new(grid.clone(), vec![Robot::new(7, pickup, pickup)]);
 
         state = tick(&state, true);
         assert_eq!(state.robots[0].task, Task::Picking);
@@ -938,5 +1036,29 @@ mod tests {
         if next.pos != pickup {
             assert_eq!(next.task, Task::Idle, "auto cycle should overwrite the manual task while still transiting to the pickup point");
         }
+    }
+
+    #[test]
+    fn station_new_derives_correct_cells_from_index() {
+        let s0 = Station::new(0);
+        assert_eq!(s0.belt_cell, (STATION_XS[0], BELT_ROW));
+        assert_eq!(s0.robot_cell, (STATION_XS[0], STATION_ROBOT_ROW));
+        assert_eq!(s0.part_inventory, STATION_MAX_INVENTORY);
+    }
+
+    #[test]
+    fn sim_state_new_seeds_exactly_station_count_stations_with_no_products() {
+        let state = SimState::new(Arc::new(Grid::new(9, 7)), Vec::new());
+        assert_eq!(state.stations.len(), STATION_COUNT);
+        assert!(state.products.is_empty());
+        for (i, station) in state.stations.iter().enumerate() {
+            assert_eq!(station.index, i as u8);
+        }
+    }
+
+    #[test]
+    fn new_robot_defaults_to_helper_role() {
+        let robot = Robot::new(1, (0, 0), (0, 0));
+        assert_eq!(robot.role, RobotRole::Helper);
     }
 }

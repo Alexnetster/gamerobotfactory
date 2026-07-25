@@ -152,7 +152,7 @@ mod tests {
     use std::sync::Arc;
 
     fn empty_state() -> GameState {
-        GameState::new(SimState { grid: Arc::new(Grid::new(5, 5)), robots: Vec::new(), tick_count: 0 })
+        GameState::new(SimState::new(Arc::new(Grid::new(5, 5)), Vec::new()))
     }
 
     #[test]

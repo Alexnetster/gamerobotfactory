@@ -83,7 +83,7 @@ fn initial_state() -> SharedState {
     // sim_core::sim::work_points가 컨베이어 벨트 칸으로 픽업/배치
     // 지점을 고르므로(설계 결정: 벨트와 무관한 허공에서 화물이 나타났다
     // 사라진다는 실사용 피드백) 클라이언트가 그리는 벨트와도 일치한다.
-    let sim = SimState { grid: Arc::new(Grid::new(9, 7)), robots: Vec::new(), tick_count: 0 };
+    let sim = SimState::new(Arc::new(Grid::new(9, 7)), Vec::new());
     Arc::new(Mutex::new(GameState::new(sim)))
 }
 
@@ -375,7 +375,8 @@ mod tests {
 
     #[test]
     fn safe_tick_passes_through_normal_ticks_unchanged() {
-        let sim = SimState { grid: Arc::new(Grid::new(3, 3)), robots: Vec::new(), tick_count: 5 };
+        let mut sim = SimState::new(Arc::new(Grid::new(3, 3)), Vec::new());
+        sim.tick_count = 5;
         let result = safe_tick(&sim, false);
         assert!(result.is_some());
         assert_eq!(result.unwrap().tick_count, 6);
