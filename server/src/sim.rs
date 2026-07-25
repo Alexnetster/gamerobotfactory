@@ -684,15 +684,27 @@ fn run_helper_logistics(
         pending.push(HelperTask::DeliverFrame);
     }
 
-    // (2) 노는 헬퍼에게 배정 — 먼저 발생한 요청(큐 맨 앞)부터.
-    for robot in robots.iter_mut() {
-        if robot.role != RobotRole::Helper || robot.helper_assignment.is_some() {
-            continue;
-        }
+    // (2) 노는 헬퍼에게 배정 — 먼저 발생한 요청(큐 맨 앞)부터. 배정 순서는
+    // `robots` Vec 순서가 아니라 robot_id 오름차순으로 명시적으로 고정한다
+    // (`resolve_intents`가 `intent.mover_id`로 명시적 타이브레이크하는 것과
+    // 같은 이유) — 오늘은 `game_state::set_robot_count`가 항상 커지는 id를
+    // 끝에 append하고 줄어들 때도 최댓값 id를 제거해서 Vec 순서가 id
+    // 오름차순과 우연히 일치하지만, 그 불변식은 이 함수 밖에 있고 여기서
+    // 재확인할 방법이 없다 — Vec 순서에 그냥 기대면 나중에 그 불변식이
+    // 깨지는 순간(혹은 이 파일의 테스트처럼 `robots.push`로 순서를 직접
+    // 뒤섞는 호출부) 배정이 비결정적으로 보이게 된다.
+    let mut idle_helper_indices: Vec<usize> = robots
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.role == RobotRole::Helper && r.helper_assignment.is_none())
+        .map(|(index, _)| index)
+        .collect();
+    idle_helper_indices.sort_by_key(|&index| robots[index].id);
+    for index in idle_helper_indices {
         if pending.is_empty() {
             break;
         }
-        robot.helper_assignment = Some(pending.remove(0));
+        robots[index].helper_assignment = Some(pending.remove(0));
     }
 
     // (3) 드롭 완료 반영 — work_ticks_remaining이 막 0이 된(carrying=true였던)
@@ -1201,5 +1213,54 @@ mod tests {
         let next = tick(&state, true);
 
         assert_eq!(next.robots[0].helper_assignment, None);
+    }
+
+    #[test]
+    fn two_simultaneously_depleted_stations_are_each_restocked_by_a_different_idle_helper() {
+        // 기존 헬퍼 테스트 5개는 전부 스테이션 1개 + 헬퍼 최대 1대만
+        // 다뤄서, 여러 스테이션이 같은 틱에 동시에 고갈되고 여러 헬퍼가
+        // 동시에 놀고 있을 때 "각 스테이션이 서로 다른 헬퍼에게 배정돼
+        // 결국 둘 다 채워지는지"는 실측된 적이 없었다(코드 리뷰에서 손으로
+        // 추적한 결과 로직 자체는 맞다고 확인됨 — enqueue 루프가 스테이션
+        // 마다 별개의 `RestockStation{0}`/`RestockStation{1}` 태스크를
+        // 큐에 넣고, FIFO 배정이 서로 다른 헬퍼에게 순서대로 나눠주므로).
+        let mut state = SimState::new(
+            Arc::new(Grid::new(9, 7)),
+            vec![Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL), Robot::new(2, WAREHOUSE_CELL, WAREHOUSE_CELL)],
+        );
+        state.stations[0].part_inventory = 0;
+        state.stations[1].part_inventory = 0;
+        // 스테이션 2는 일부러 그대로 둔다(가득 참) — 배정 로직이 고갈된
+        // 스테이션만 골라내고 멀쩡한 스테이션은 안 건드리는지도 같이 확인.
+        assert_eq!(state.stations[2].part_inventory, STATION_MAX_INVENTORY);
+
+        let next = tick(&state, true);
+
+        let assignment_of = |s: &SimState, id: u32| s.robots.iter().find(|r| r.id == id).unwrap().helper_assignment;
+        assert_eq!(assignment_of(&next, 1), Some(HelperTask::RestockStation { station_index: 0 }));
+        assert_eq!(assignment_of(&next, 2), Some(HelperTask::RestockStation { station_index: 1 }));
+        assert_ne!(
+            assignment_of(&next, 1),
+            assignment_of(&next, 2),
+            "두 헬퍼가 같은 태스크를 놓고 경쟁하면 안 되고 서로 다른 스테이션을 맡아야 한다"
+        );
+
+        let mut state = next;
+        let mut station0_done = false;
+        let mut station1_done = false;
+        for _ in 0..500 {
+            state = tick(&state, true);
+            station0_done |= state.stations[0].part_inventory == STATION_MAX_INVENTORY;
+            station1_done |= state.stations[1].part_inventory == STATION_MAX_INVENTORY;
+            if station0_done && station1_done {
+                break;
+            }
+        }
+        assert!(station0_done, "스테이션 0도 결국 재고가 채워져야 한다");
+        assert!(station1_done, "스테이션 1도 결국 재고가 채워져야 한다");
+        assert_eq!(
+            state.stations[2].part_inventory, STATION_MAX_INVENTORY,
+            "원래부터 가득 차 있던 스테이션 2는 그대로 유지돼야 한다"
+        );
     }
 }
