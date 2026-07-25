@@ -71,15 +71,25 @@ export function drawScene(ctx: CanvasRenderingContext2D, canvasWidth: number, ca
     drawProduct(ctx, product)
   }
 
-  for (const station of input.stations) {
-    drawStationInventoryWarning(ctx, station)
-  }
-
   for (const robot of sortRobotsForDrawing(input.robots)) {
     if (input.showPaths) {
       drawPath(ctx, robot)
     }
     drawRobot(ctx, robot, robot.id === input.selectedRobotId)
+  }
+
+  // 로봇 루프 뒤에 그린다 — 이 경고는 그 로봇 위에 얹히는 오버레이라
+  // 로봇의 센서 헤드 블록(drawRobot, bodyTopY-2~+5)보다 항상 위(나중)에
+  // 그려져야 한다. 예전엔 로봇 루프보다 먼저 그렸는데, 로봇 몸통이 서
+  // 있을 때 헤드 블록이 이 삼각형의 밑변 ~4px를 덮어써 뾰족한 끝만 보이는
+  // 시각 버그가 있었다(코드 리뷰에서 실측 재현: 재고 0은 흔한 정상
+  // 상태라 매 프레임 발생). `Failed` 로봇 경고 삼각형(drawRobot 내부,
+  // warnY = bodyTopY - 10)처럼 오프셋을 더 키워 여유를 주는 방법도
+  // 있었지만, 그러면 BODY_HEIGHT/bodyLift가 바뀔 때마다 또 손으로
+  // 맞춰야 한다 — 그리기 순서를 뒤로 미는 쪽이 기하학적 상수에
+  // 의존하지 않아 더 견고하다.
+  for (const station of input.stations) {
+    drawStationInventoryWarning(ctx, station)
   }
 
   ctx.restore()
