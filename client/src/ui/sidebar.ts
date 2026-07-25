@@ -51,6 +51,10 @@ export class Sidebar {
     this.conveyorButton.addEventListener('click', () => callbacks.onToggleConveyor())
     globalSection.appendChild(this.conveyorButton)
 
+    const countLabel = document.createElement('span')
+    countLabel.textContent = '헬퍼 로봇 수 '
+    globalSection.appendChild(countLabel)
+
     const decButton = document.createElement('button')
     decButton.textContent = '-'
     decButton.addEventListener('click', () => callbacks.onChangeRobotCount(-1))

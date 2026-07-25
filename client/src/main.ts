@@ -2,7 +2,7 @@ import { Connection } from './net/connection'
 import type { ConnectionStatus } from './net/connection'
 import { createEmptyMirror, applyServerMessage } from './state/mirror'
 import type { MirrorState } from './state/mirror'
-import { computeRenderRobots } from './state/interpolation'
+import { computeRenderRobots, computeRenderProducts } from './state/interpolation'
 import type { TickSnapshot } from './state/interpolation'
 import { drawScene } from './render/canvas'
 import { gridToScreen, RENDER_SCALE } from './render/projection'
@@ -11,8 +11,7 @@ import type { ServerMessage } from './net/protocol'
 import type { WebSocketLike } from './net/connection'
 import { resolveWsUrl } from './net/resolve-ws-url'
 
-// U자 컨베이어가 이소메트릭 각도에서 알아볼 수 있는 최소 크기(브레인스토밍
-// 목업 기준 7x6 이상 권장).
+// 그리드 크기 — server/src/main.rs::initial_state()와 정확히 일치해야 한다.
 const GRID_SIZE = { width: 9, height: 7 }
 
 function setupLayout(): { canvas: HTMLCanvasElement; sidebarContainer: HTMLElement } {
@@ -69,7 +68,8 @@ function main(): void {
   const sidebar = new Sidebar(sidebarContainer, {
     onToggleConveyor: () => connection.send({ type: 'ToggleConveyor' }),
     onChangeRobotCount: (delta) => {
-      const nextCount = Math.max(0, mirror.robots.size + delta)
+      const currentHelperCount = [...mirror.robots.values()].filter((r) => r.role.kind === 'Helper').length
+      const nextCount = Math.max(1, currentHelperCount + delta)
       connection.send({ type: 'SetRobotCount', count: nextCount })
     },
     onSelectArmAction: (task) => {
@@ -97,10 +97,11 @@ function main(): void {
   // retrying"으로 실제 재현됨). 캔버스 애니메이션(drawScene)은 여전히
   // frame()에서 매 프레임 그린다.
   function renderSidebar(): void {
+    const helperCount = [...mirror.robots.values()].filter((r) => r.role.kind === 'Helper').length
     sidebar.update({
       connection: connectionStatus,
       conveyor: mirror.conveyor,
-      robotCount: mirror.robots.size,
+      robotCount: helperCount,
       selectedRobot: selectedRobotId !== null ? (mirror.robots.get(selectedRobotId) ?? null) : null,
       pathDebugEnabled,
     })
@@ -157,10 +158,13 @@ function main(): void {
   function frame(): void {
     const now = performance.now()
     const rendered = currSnapshot ? computeRenderRobots(prevSnapshot, currSnapshot, now) : []
+    const renderedProducts = currSnapshot ? computeRenderProducts(prevSnapshot, currSnapshot, now) : []
     drawScene(ctx, canvas.width, canvas.height, {
       grid: GRID_SIZE,
       conveyor: mirror.conveyor,
       robots: rendered,
+      products: renderedProducts,
+      stations: mirror.stations,
       showPaths: pathDebugEnabled,
       animationTimeMs: now,
       selectedRobotId,
