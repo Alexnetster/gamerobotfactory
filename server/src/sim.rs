@@ -1,9 +1,15 @@
 use crate::grid::{CellId, Grid};
+use crate::pathfind::find_path;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const LEG_CYCLE_SPEED: f32 = 0.1;
+// 헬퍼가 경로를 다시 계산하기 전 기존 경로를 유지하는 최소 틱 수 —
+// 매 틱 재계산하면 낭비이므로(길찾기가 A*라 상대적으로 비쌈), 어느 정도
+// 오래된 점유 스냅샷 기반 경로도 허용한다(헬퍼는 순찰보다 목적지가
+// 명확해 짧은 지연은 문제되지 않음).
+const REPATH_INTERVAL: u32 = 10;
 // 1000초(약 17분) 분량의 작업(20Hz 기준) — 튜닝 대상. 2000(100초) →
 // 6000(5분)으로 한 번 완화했으나, 실사용 피드백("수리 후에도 금방 다시
 // 고장난다")으로 다시 낮춤: wear_ratio가 0에서 다시 쌓여야 하는 건
@@ -115,6 +121,23 @@ pub enum RobotRole {
     Helper,
 }
 
+/// 헬퍼 로봇에게 배정 가능한 작업(설계문서 §6). `RestockStation`은
+/// 창고→그 스테이션의 `robot_cell`로, `DeliverFrame`은 창고→라인
+/// 시작점(`(BELT_START_X, BELT_ROW)`)으로 화물을 나른다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperTask {
+    RestockStation { station_index: u8 },
+    DeliverFrame,
+}
+
+/// 헬퍼 한 대가 지금 어느 단계에 있는지 — 배정만 되고 아직 창고에
+/// 도착 전인지, 픽업 카운트다운 중인지, 목적지로 이동 중인지, 드롭
+/// 카운트다운 중인지. `Robot.carrying`(이동/드롭 단계 여부)과
+/// `Robot.work_ticks_remaining`(픽업/드롭 카운트다운)을 그대로
+/// 재사용하고(설계문서 §4), 이 필드는 "지금 무슨 작업을 배정받았는지"만
+/// 담는다 — 배정 자체가 없으면 `None`(=Idle, 큐에서 다음 일을 기다림).
+pub type HelperAssignment = Option<HelperTask>;
+
 #[derive(Debug, Clone)]
 pub struct Robot {
     pub id: u32,
@@ -130,6 +153,7 @@ pub struct Robot {
     pub carrying: bool,
     pub work_ticks_remaining: u32,
     pub role: RobotRole,
+    pub helper_assignment: HelperAssignment,
 }
 
 impl Robot {
@@ -148,6 +172,7 @@ impl Robot {
             carrying: false,
             work_ticks_remaining: 0,
             role: RobotRole::Helper,
+            helper_assignment: None,
         }
     }
 
@@ -249,12 +274,17 @@ impl Station {
     }
 }
 
+fn station_robot_cell(station_index: u8) -> CellId {
+    (STATION_XS[station_index as usize], STATION_ROBOT_ROW)
+}
+
 #[derive(Debug, Clone)]
 pub struct SimState {
     pub grid: Arc<Grid>,
     pub robots: Vec<Robot>,
     pub products: Vec<Product>,
     pub stations: Vec<Station>,
+    pub pending_helper_tasks: Vec<HelperTask>,
     pub tick_count: u64,
 }
 
@@ -269,6 +299,7 @@ impl SimState {
             robots,
             products: Vec::new(),
             stations: (0..STATION_COUNT as u8).map(Station::new).collect(),
+            pending_helper_tasks: Vec::new(),
             tick_count: 0,
         }
     }
@@ -349,25 +380,25 @@ pub fn tick(state: &SimState, conveyor_running: bool) -> SimState {
         (state.products.clone(), state.stations.clone())
     };
 
+    let (new_robots, new_stations, new_products, new_pending_helper_tasks) =
+        run_helper_logistics(new_robots, new_stations, new_products, state.pending_helper_tasks.clone(), conveyor_running);
+
     SimState {
         grid: state.grid.clone(),
         robots: new_robots,
         products: new_products,
         stations: new_stations,
+        pending_helper_tasks: new_pending_helper_tasks,
         tick_count: state.tick_count + 1,
     }
 }
 
-// `_grid`/`_occupied`/`_conveyor_running`: 이 태스크 시점엔 Assembly/Helper
-// 둘 다 스스로 이동하지 않으므로 쓰이지 않는다(위 각 분기의 doc 주석
-// 참고) — Task 3가 헬퍼 이동 로직을 채우면 다시 쓰이게 되므로 시그니처는
-// 미리 맞춰두고 이름만 밑줄로 죽은 파라미터 경고를 끈다.
 fn plan_robot(
-    _grid: &Grid,
+    grid: &Grid,
     robot: &Robot,
-    _occupied: &HashSet<CellId>,
+    occupied: &HashSet<CellId>,
     tick_count: u64,
-    _conveyor_running: bool,
+    conveyor_running: bool,
     active_stations: &HashSet<u8>,
 ) -> Robot {
     let mut next = update_status(robot.clone(), tick_count);
@@ -395,12 +426,87 @@ fn plan_robot(
             next
         }
         RobotRole::Helper => {
-            // Task 3에서 창고<->스테이션/라인시작 이동 로직을 채운다.
-            // 이 태스크 시점에는 헬퍼가 아무 일도 하지 않는다(제자리 대기)
-            // — conveyor_running과 무관하게 항상 정지.
-            next
+            if !conveyor_running {
+                return next;
+            }
+            plan_helper(grid, next, occupied, tick_count)
         }
     }
+}
+
+/// 헬퍼 로봇의 창고<->목적지 왕복(설계문서 §6). `helper_assignment`가
+/// `None`이면 아무 것도 하지 않는다(작업 배정은 `tick()`이 로봇 목록
+/// 전체를 보고 매 틱 결정하므로 이 함수 진입 전에 이미 채워져 있다고
+/// 가정) — 배정된 작업이 있을 때의 이동/카운트다운만 여기서 처리한다.
+fn plan_helper(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, tick_count: u64) -> Robot {
+    let Some(task) = next.helper_assignment else {
+        return next;
+    };
+
+    let destination = match task {
+        HelperTask::RestockStation { station_index } => station_robot_cell(station_index),
+        HelperTask::DeliverFrame => (BELT_START_X, BELT_ROW),
+    };
+
+    if next.work_ticks_remaining > 0 {
+        next.work_ticks_remaining -= 1;
+        return next;
+    }
+
+    let target = if next.carrying { destination } else { WAREHOUSE_CELL };
+
+    if next.pos != target {
+        if next.goal != target {
+            next.goal = target;
+            next.path.clear();
+            next.ticks_until_repath = 0;
+        }
+        next = advance_along_path(grid, next, occupied, tick_count);
+        if next.pos != target {
+            return next; // 아직 도착 전 — 다음 틱에 계속 이동
+        }
+        // 이번 틱에 막 도착했다 — 곧바로 아래에서 카운트다운을 시작한다.
+        // "도착"과 "카운트다운 시작" 사이에 아무 일도 안 하는 틱을 끼우면
+        // (즉 여기서 그냥 return next 했다면) work_ticks_remaining이 여전히
+        // 0인 채로 pos == target인 상태가 한 틱 존재하게 되는데,
+        // run_helper_logistics의 드롭 완료 판정(carrying &&
+        // work_ticks_remaining == 0 && pos == destination)이 "막 도착함"과
+        // "카운트다운이 다 끝남"을 구분하지 못해 그 틱에 곧바로 드롭을
+        // 완료시켜 버린다 — HELPER_DROP_TICKS 카운트다운 전체가 건너뛰어짐
+        // (실측: mutation test로 재현 — 도착까지 걸린 이동 틱 수만으로
+        // 완료되고 HELPER_DROP_TICKS만큼 더 걸리지 않는 것을 확인함).
+    }
+
+    next.work_ticks_remaining = if next.carrying { HELPER_DROP_TICKS } else { HELPER_PICKUP_TICKS };
+    if !next.carrying {
+        next.carrying = true; // 창고 도착 -> 픽업 카운트다운 시작(들었다고 가정, 드롭 시 실제 효과 적용은 tick()에서)
+    }
+    next
+}
+
+/// 헬퍼가 목표(`next.goal`)를 향해 경로를 따라 한 칸 전진한다. 순찰
+/// 전용이던 `PATROL_MOVE_INTERVAL_TICKS` 지연은 여기서 넣지 않는다 —
+/// 헬퍼는 매 틱 이동해도 무방하다(의도적 차이, 오래된 순찰 로직의
+/// 흔적이 아님). `tick_count` 파라미터는 인터페이스 일관성을 위해
+/// 남겨두되 이 함수 안에서는 쓰이지 않는다.
+fn advance_along_path(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, _tick_count: u64) -> Robot {
+    if next.path.is_empty() || next.ticks_until_repath == 0 {
+        let mut blocked = occupied.clone();
+        blocked.remove(&next.pos);
+        next.path = find_path(grid, next.pos, next.goal, &blocked).unwrap_or_default();
+        next.ticks_until_repath = REPATH_INTERVAL;
+    } else {
+        next.ticks_until_repath -= 1;
+    }
+
+    if let Some(&next_cell) = next.path.first() {
+        if !occupied.contains(&next_cell) {
+            next.pos = next_cell;
+            next.path.remove(0);
+        }
+    }
+
+    next
 }
 
 /// `plan_robot`을 패닉으로부터 격리한다. 패닉이 나면 해당 로봇은 이번
@@ -541,6 +647,84 @@ fn plan_products(products: &[Product], stations: &[Station]) -> (Vec<Product>, V
     let remaining: Vec<Product> = updated.into_iter().filter(|p| p.pos.0 < BELT_END_X).collect();
 
     (remaining, stations)
+}
+
+/// 헬퍼 로직 한 틱 분: (1) 재고/프레임 부족을 감지해 큐에 새 요청을
+/// 추가(중복 방지, 설계문서 §6), (2) 노는 헬퍼에게 큐 맨 앞 요청을 배정,
+/// (3) 드롭 카운트다운이 막 끝난 헬퍼의 화물을 실제 목적지에 반영
+/// (재고 채우기 또는 새 프레임 생성)한다. 세 가지를 한 함수로 묶은 이유:
+/// 셋 다 "이번 틱에 로봇/스테이션/제품 상태를 서로 참조하며 갱신"하는
+/// 같은 트랜잭션의 부분들이라 나누면 오히려 상태를 두 번씩 넘겨야 한다.
+fn run_helper_logistics(
+    mut robots: Vec<Robot>,
+    mut stations: Vec<Station>,
+    mut products: Vec<Product>,
+    mut pending: Vec<HelperTask>,
+    conveyor_running: bool,
+) -> (Vec<Robot>, Vec<Station>, Vec<Product>, Vec<HelperTask>) {
+    if !conveyor_running {
+        return (robots, stations, products, pending);
+    }
+
+    // (1) 새 요청 발생 — 이미 큐에 있거나 배정된 요청은 다시 만들지 않는다.
+    let already_wanted = |task: HelperTask, pending: &[HelperTask], robots: &[Robot]| {
+        pending.contains(&task) || robots.iter().any(|r| r.helper_assignment == Some(task))
+    };
+
+    for station in &stations {
+        let task = HelperTask::RestockStation { station_index: station.index };
+        if station.part_inventory == 0 && !already_wanted(task, &pending, &robots) {
+            pending.push(task);
+        }
+    }
+
+    let line_start = (BELT_START_X, BELT_ROW);
+    let line_start_empty = !products.iter().any(|p| p.pos == line_start);
+    if line_start_empty && !already_wanted(HelperTask::DeliverFrame, &pending, &robots) {
+        pending.push(HelperTask::DeliverFrame);
+    }
+
+    // (2) 노는 헬퍼에게 배정 — 먼저 발생한 요청(큐 맨 앞)부터.
+    for robot in robots.iter_mut() {
+        if robot.role != RobotRole::Helper || robot.helper_assignment.is_some() {
+            continue;
+        }
+        if pending.is_empty() {
+            break;
+        }
+        robot.helper_assignment = Some(pending.remove(0));
+    }
+
+    // (3) 드롭 완료 반영 — work_ticks_remaining이 막 0이 된(carrying=true였던)
+    // 헬퍼의 화물을 실제로 목적지에 적용하고 배정을 해제한다.
+    for robot in robots.iter_mut() {
+        if robot.role != RobotRole::Helper || !robot.carrying || robot.work_ticks_remaining != 0 {
+            continue;
+        }
+        let Some(task) = robot.helper_assignment else { continue };
+        let at_destination = match task {
+            HelperTask::RestockStation { station_index } => robot.pos == station_robot_cell(station_index),
+            HelperTask::DeliverFrame => robot.pos == line_start,
+        };
+        if !at_destination {
+            continue;
+        }
+        match task {
+            HelperTask::RestockStation { station_index } => {
+                if let Some(station) = stations.iter_mut().find(|s| s.index == station_index) {
+                    station.part_inventory = STATION_MAX_INVENTORY;
+                }
+            }
+            HelperTask::DeliverFrame => {
+                let new_id = products.iter().map(|p| p.id).max().map_or(0, |max| max + 1);
+                products.push(Product::new(new_id, line_start));
+            }
+        }
+        robot.carrying = false;
+        robot.helper_assignment = None;
+    }
+
+    (robots, stations, products, pending)
 }
 
 #[cfg(test)]
@@ -886,5 +1070,136 @@ mod tests {
         }
 
         assert_eq!(state.robots[0].pos, (STATION_XS[0], STATION_ROBOT_ROW), "조립 로봇은 절대 이동하면 안 된다");
+    }
+
+    #[test]
+    fn a_depleted_station_gets_exactly_one_restock_request_queued() {
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), Vec::new());
+        state.stations[0].part_inventory = 0;
+
+        let next = tick(&state, true);
+
+        // 헬퍼가 한 대도 없으므로 배정될 로봇이 있을 수 없다 — 큐 길이와는
+        // 별개로 확인한다(둘을 하나로 합쳐 세면, 큐에 정확히 1개가 쌓이는
+        // 정상 동작 자체가 이 합계를 0이 아니게 만들어 항상 모순되므로 분리).
+        let assigned_count = next
+            .robots
+            .iter()
+            .filter(|r| r.helper_assignment == Some(HelperTask::RestockStation { station_index: 0 }))
+            .count();
+        assert_eq!(assigned_count, 0, "헬퍼가 한 대도 없으면 요청만 큐에 쌓이고 아무도 배정받지 않는다");
+        // `pending_helper_tasks.len()` 전체가 아니라 RestockStation{0} 요청
+        // 개수만 센다: `SimState::new`는 제품 없이 시작하므로 라인 시작점도
+        // 비어 있어(설계문서 §5-4) 같은 틱에 `DeliverFrame` 요청도 정당하게
+        // 함께 큐에 들어간다 — 그건 이 테스트가 검증하려는 대상이 아니다.
+        let restock_request_count = |s: &SimState| {
+            s.pending_helper_tasks.iter().filter(|t| **t == HelperTask::RestockStation { station_index: 0 }).count()
+        };
+        assert_eq!(restock_request_count(&next), 1, "요청은 정확히 한 번만 큐에 들어가야 한다(중복 방지)");
+
+        let after_another_tick = tick(&next, true);
+        assert_eq!(
+            restock_request_count(&after_another_tick),
+            1,
+            "재고가 여전히 0이어도 이미 큐에 있는 요청을 또 추가하면 안 된다"
+        );
+    }
+
+    #[test]
+    fn an_idle_helper_gets_assigned_the_oldest_pending_request() {
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL)]);
+        state.stations[0].part_inventory = 0;
+
+        let next = tick(&state, true);
+
+        assert_eq!(next.robots[0].helper_assignment, Some(HelperTask::RestockStation { station_index: 0 }));
+    }
+
+    #[test]
+    fn helper_restocks_a_station_end_to_end() {
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL)]);
+        state.stations[0].part_inventory = 0;
+
+        let mut restocked = false;
+        for _ in 0..500 {
+            state = tick(&state, true);
+            if state.stations[0].part_inventory == STATION_MAX_INVENTORY {
+                restocked = true;
+                break;
+            }
+        }
+        assert!(restocked, "헬퍼가 결국 스테이션 재고를 채워야 한다");
+        assert_eq!(state.robots[0].helper_assignment, None, "임무를 마치면 배정이 풀려야 한다");
+        assert!(!state.robots[0].carrying);
+    }
+
+    #[test]
+    fn helper_drop_countdown_actually_elapses_after_arriving_and_is_not_skipped() {
+        // 계획서에는 없던 추가 테스트 — 리뷰 중 뮤테이션 테스트로 실제
+        // 버그를 하나 발견해서 그 회귀를 막기 위해 추가했다. 헬퍼가 목적지
+        // 칸에 도착하는 바로 그 틱엔 `work_ticks_remaining`이 (이동 전부터)
+        // 계속 0인 채라(픽업 카운트다운이 이미 끝나 있었으므로), 만약
+        // "도착"과 "카운트다운 시작"을 별개 틱으로 나누면
+        // `run_helper_logistics`의 드롭 완료 판정(carrying &&
+        // work_ticks_remaining == 0 && pos == destination)이 "막 도착함"과
+        // "카운트다운이 다 끝남"을 구분 못 해 `HELPER_DROP_TICKS` 전체를
+        // 건너뛰고 도착 즉시 드롭을 완료시켜 버렸다(실제로 재현: 이동
+        // 거리만큼의 틱 수만에 완료됨). `plan_helper`가 도착 틱에 곧바로
+        // 카운트다운을 시작하도록 고쳐서 고쳤다 — 이 테스트는 그 고정을
+        // 검증한다(총 소요 틱 = 이동 거리 + HELPER_DROP_TICKS 이상이어야
+        // 함).
+        let mut robot = Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL);
+        robot.carrying = true;
+        robot.work_ticks_remaining = 0;
+        robot.helper_assignment = Some(HelperTask::RestockStation { station_index: 0 });
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]);
+        state.stations[0].part_inventory = 0;
+
+        let manhattan_distance = (WAREHOUSE_CELL.0 - STATION_XS[0]).abs() + (WAREHOUSE_CELL.1 - STATION_ROBOT_ROW).abs();
+
+        let mut ticks_elapsed = 0;
+        loop {
+            state = tick(&state, true);
+            ticks_elapsed += 1;
+            if state.robots[0].helper_assignment.is_none() {
+                break;
+            }
+            if ticks_elapsed > 100 {
+                panic!("never completed");
+            }
+        }
+        assert!(
+            ticks_elapsed >= manhattan_distance as u32 + HELPER_DROP_TICKS,
+            "expected at least travel({manhattan_distance}) + HELPER_DROP_TICKS({HELPER_DROP_TICKS}) ticks, got {ticks_elapsed}"
+        );
+    }
+
+    #[test]
+    fn helper_delivers_a_fresh_frame_when_the_line_start_is_empty() {
+        let state = SimState::new(Arc::new(Grid::new(9, 7)), vec![Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL)]);
+        assert!(state.products.is_empty());
+
+        let mut state = state;
+        let mut delivered = false;
+        for _ in 0..500 {
+            state = tick(&state, true);
+            if state.products.iter().any(|p| p.pos == (BELT_START_X, BELT_ROW) && p.stage == 0) {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "라인 시작점이 비어있으면 헬퍼가 결국 새 프레임을 가져다 놓아야 한다");
+    }
+
+    #[test]
+    fn assembly_robots_are_never_assigned_helper_tasks() {
+        let mut robot = Robot::new(1, station_robot_cell(0), station_robot_cell(0));
+        robot.role = RobotRole::Assembly { station_index: 0 };
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]);
+        state.stations[0].part_inventory = 0;
+
+        let next = tick(&state, true);
+
+        assert_eq!(next.robots[0].helper_assignment, None);
     }
 }

@@ -146,4 +146,22 @@ proptest! {
             }
         }
     }
+
+    /// 여러 제품이 벨트 위에 있어도, 한 틱 뒤에 서로 다른 칸에 있어야
+    /// 한다(설계문서 §7) — 로봇의 `tick_never_produces_collisions`와
+    /// 같은 불변식을 제품에도 적용.
+    #[test]
+    fn products_never_occupy_the_same_cell(start_xs in proptest::sample::subsequence((sim_core::sim::BELT_START_X..sim_core::sim::BELT_END_X).collect::<Vec<i32>>(), 4), conveyor_running: bool) {
+        use sim_core::sim::{Product, SimState, BELT_ROW};
+        let products: Vec<Product> = start_xs.into_iter().enumerate().map(|(i, x)| Product::new(i as u32, (x, BELT_ROW))).collect();
+        let mut state = SimState::new(Arc::new(Grid::new(SIZE, SIZE)), Vec::new());
+        state.products = products;
+
+        let next = tick(&state, conveyor_running);
+
+        let mut seen = HashSet::new();
+        for product in &next.products {
+            prop_assert!(seen.insert(product.pos), "duplicate product position after tick: {:?}", product.pos);
+        }
+    }
 }
