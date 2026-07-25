@@ -771,6 +771,11 @@ mod tests {
 
         state = tick(&state, true);
         assert_eq!(state.products[0].stage, 1, "정확히 ASSEMBLY_TICKS번째 틱에 stage가 올라야 한다");
+        assert_eq!(
+            state.products[0].pos,
+            (station_x + 1, BELT_ROW),
+            "조립이 끝나 stage가 오른 바로 그 틱에 제품이 한 칸 전진해야 한다(같은 틱 내 즉시 이동)"
+        );
     }
 
     #[test]
