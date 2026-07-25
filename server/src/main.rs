@@ -418,6 +418,14 @@ mod tests {
     }
 
     #[test]
+    fn detect_completed_assemblies_counts_multiple_simultaneous_completions() {
+        let previous = vec![sample_product_view(1), sample_product_view(2), sample_product_view(3)];
+        let current: Vec<protocol::ProductView> = vec![];
+
+        assert_eq!(detect_completed_assemblies(&previous, &current), 3);
+    }
+
+    #[test]
     fn detect_completed_assemblies_is_zero_when_nothing_disappeared() {
         let previous = vec![sample_product_view(1)];
         let current = vec![sample_product_view(1)];

@@ -715,7 +715,7 @@ fn plan_products(products: &[Product], stations: &[Station]) -> (Vec<Product>, V
     // 칸에 머무는 모습은 렌더링되지 않는다(설계문서 §5-3) — 도착하는
     // 순간 제거된다. 완료 감지(생산량 집계)는 sim_core 밖(main.rs)에서
     // "이전 틱엔 있었는데 이번 틱엔 없어진 제품 id"로 한다(기존
-    // `detect_completed_placements`와 같은 패턴).
+    // `detect_completed_assemblies`와 같은 패턴).
     let remaining: Vec<Product> = updated.into_iter().filter(|p| p.pos.0 < BELT_END_X).collect();
 
     (remaining, stations)
