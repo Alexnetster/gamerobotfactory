@@ -11,7 +11,7 @@ git pull
 if errorlevel 1 (
     echo.
     echo git pull failed - resolve this manually before continuing.
-    echo (Uncommitted local changes or a merge conflict is the usual cause.)
+    echo Uncommitted local changes or a merge conflict is the usual cause.
     pause
     exit /b 1
 )
