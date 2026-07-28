@@ -41,14 +41,19 @@ function nextMessage(ws: WebSocket): Promise<ServerMessage> {
 }
 
 describe('client state layer against a real running server', () => {
-  it('mirrors an initial empty Snapshot from the real server', async () => {
+  it('mirrors the initial Snapshot (3 always-present assembly robots) from the real server', async () => {
     const ws = await connect(server.port)
     try {
       const first = await nextMessage(ws)
 
       expect(first.kind).toBe('Snapshot')
       const mirror: MirrorState = applyServerMessage(createEmptyMirror(), first)
-      expect(mirror.robots.size).toBe(0)
+      // 서버는 항상 조립 로봇 3대로 시작한다(설계문서 §4) — 헬퍼는
+      // SetRobotCount로만 늘어난다.
+      expect(mirror.robots.size).toBe(3)
+      for (const robot of mirror.robots.values()) {
+        expect(robot.role.kind).toBe('Assembly')
+      }
     } finally {
       ws.close()
     }

@@ -1,5 +1,5 @@
 import type { MirrorState } from './mirror'
-import type { RobotView } from '../net/protocol'
+import type { ProductView, RobotView } from '../net/protocol'
 
 export const TICK_DURATION_MS = 50
 // 다음 틱이 지연되면 이 시간(ms)만큼만 짧게 외삽한 뒤 그 지점에서
@@ -52,6 +52,33 @@ export function computeRenderRobots(prev: TickSnapshot | null, curr: TickSnapsho
       renderPos: {
         x: lerp(prevRobot.pos.x, robot.pos.x, factor),
         y: lerp(prevRobot.pos.y, robot.pos.y, factor),
+      },
+    })
+  }
+  return result
+}
+
+export interface InterpolatedProduct extends ProductView {
+  renderPos: { x: number; y: number }
+}
+
+/** `computeRenderRobots`와 완전히 같은 보간 규칙 — 제품도 서버 틱 사이를
+ * 매끄럽게 이동하는 것처럼 보이려면 같은 처리가 필요하다. */
+export function computeRenderProducts(prev: TickSnapshot | null, curr: TickSnapshot, nowMs: number): InterpolatedProduct[] {
+  const factor = computeRenderFactor(nowMs - curr.receivedAtMs)
+  const result: InterpolatedProduct[] = []
+
+  for (const product of curr.mirror.products.values()) {
+    const prevProduct = prev?.mirror.products.get(product.id)
+    if (!prevProduct) {
+      result.push({ ...product, renderPos: { x: product.pos.x, y: product.pos.y } })
+      continue
+    }
+    result.push({
+      ...product,
+      renderPos: {
+        x: lerp(prevProduct.pos.x, product.pos.x, factor),
+        y: lerp(prevProduct.pos.y, product.pos.y, factor),
       },
     })
   }

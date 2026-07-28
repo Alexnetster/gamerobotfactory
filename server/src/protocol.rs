@@ -135,6 +135,49 @@ pub struct RobotView {
     pub facing: WireDirection,
     pub arm_pose: WireArmPose,
     pub carrying: bool,
+    pub role: WireRobotRole,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum WireRobotRole {
+    Assembly { station_index: u8 },
+    Helper,
+}
+
+impl From<sim_core::sim::RobotRole> for WireRobotRole {
+    fn from(r: sim_core::sim::RobotRole) -> WireRobotRole {
+        match r {
+            sim_core::sim::RobotRole::Assembly { station_index } => WireRobotRole::Assembly { station_index },
+            sim_core::sim::RobotRole::Helper => WireRobotRole::Helper,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StationView {
+    pub index: u8,
+    pub robot_cell: WireCellId,
+    pub part_inventory: u32,
+}
+
+impl From<&sim_core::sim::Station> for StationView {
+    fn from(s: &sim_core::sim::Station) -> StationView {
+        StationView { index: s.index, robot_cell: s.robot_cell.into(), part_inventory: s.part_inventory }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProductView {
+    pub id: u32,
+    pub stage: u8,
+    pub pos: WireCellId,
+}
+
+impl From<&sim_core::sim::Product> for ProductView {
+    fn from(p: &sim_core::sim::Product) -> ProductView {
+        ProductView { id: p.id, stage: p.stage, pos: p.pos.into() }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -186,6 +229,7 @@ impl From<&Robot> for RobotView {
             facing: r.facing.into(),
             arm_pose: arm_pose_for(r),
             carrying: r.carrying,
+            role: r.role.into(),
         }
     }
 }
@@ -218,8 +262,25 @@ impl From<Conveyor> for ConveyorView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum ServerMessage {
-    Snapshot { v: u8, tick: u64, session_id: uuid::Uuid, conveyor: ConveyorView, robots: Vec<RobotView> },
-    Delta { v: u8, tick: u64, conveyor: Option<ConveyorView>, changed_robots: Vec<RobotView>, removed_robot_ids: Vec<u32> },
+    Snapshot {
+        v: u8,
+        tick: u64,
+        session_id: uuid::Uuid,
+        conveyor: ConveyorView,
+        robots: Vec<RobotView>,
+        stations: Vec<StationView>,
+        products: Vec<ProductView>,
+    },
+    Delta {
+        v: u8,
+        tick: u64,
+        conveyor: Option<ConveyorView>,
+        changed_robots: Vec<RobotView>,
+        removed_robot_ids: Vec<u32>,
+        stations: Vec<StationView>,
+        changed_products: Vec<ProductView>,
+        removed_product_ids: Vec<u32>,
+    },
     ResumeAck { v: u8, session_id: uuid::Uuid, resumed: bool },
 }
 
@@ -230,6 +291,8 @@ pub fn to_snapshot(state: &GameState, session_id: uuid::Uuid) -> ServerMessage {
         session_id,
         conveyor: state.conveyor.into(),
         robots: state.sim.robots.iter().map(RobotView::from).collect(),
+        stations: state.sim.stations.iter().map(StationView::from).collect(),
+        products: state.sim.products.iter().map(ProductView::from).collect(),
     }
 }
 
@@ -389,6 +452,8 @@ mod tests {
             session_id: uuid::Uuid::nil(),
             conveyor: ConveyorView { running: true },
             robots: vec![],
+            stations: vec![],
+            products: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -410,11 +475,12 @@ mod tests {
 
         let snapshot = to_snapshot(&state, uuid::Uuid::nil());
         match snapshot {
-            ServerMessage::Snapshot { v, tick, conveyor, robots, .. } => {
+            ServerMessage::Snapshot { v, tick, conveyor, robots, stations, .. } => {
                 assert_eq!(v, PROTOCOL_VERSION);
                 assert_eq!(tick, 5);
                 assert!(!conveyor.running);
-                assert_eq!(robots.len(), 2);
+                assert_eq!(robots.len(), 2 + sim_core::sim::STATION_COUNT, "헬퍼 2대 + 조립 로봇 3대");
+                assert_eq!(stations.len(), sim_core::sim::STATION_COUNT);
             }
             _ => panic!("expected Snapshot"),
         }

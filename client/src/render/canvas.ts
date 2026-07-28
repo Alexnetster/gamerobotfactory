@@ -1,37 +1,37 @@
 import { gridToScreen, zOrderKey, wristWorldOffset, elbowWorldOffset, TILE_WIDTH, TILE_HEIGHT, RENDER_SCALE } from './projection'
 import { legAnglesForPhase } from './gait'
-import type { InterpolatedRobot } from '../state/interpolation'
-import type { ConveyorView } from '../net/protocol'
+import { BELT_ROW, BELT_START_X, BELT_END_X, WAREHOUSE_ROWS } from './layout'
+import type { InterpolatedRobot, InterpolatedProduct } from '../state/interpolation'
+import type { ConveyorView, StationView } from '../net/protocol'
 
 export interface GridSize {
   width: number
   height: number
 }
 
-/** U자형 컨베이어 장식이 차지하는 칸 — 위/왼쪽/아래 세 변, 오른쪽(사이드바
- * 쪽) 개방. 서버는 이 개념을 전혀 모른다 — 순수 클라이언트 배경 장식이고
- * 로봇 이동/작업에 아무 영향도 주지 않는다. */
-export function isConveyorCell(grid: GridSize, x: number, y: number): boolean {
-  return y === 0 || y === grid.height - 1 || x === 0
+/** 일자형 벨트가 차지하는 칸(설계문서 §1) — 서버 `sim_core::sim`의
+ * `BELT_ROW`/`BELT_START_X`/`BELT_END_X`와 정확히 같은 정의를 여기 다시
+ * 써서 유지한다(서버는 자기 좌표만 보내지 이 상수들을 와이어로 보내지
+ * 않는다 — 안 바뀌는 레이아웃 상수라 매 메시지에 실을 이유가 없다는
+ * 판단, 기존 U자 벨트 때와 같은 트레이드오프). 지난번 U자 벨트에서 이
+ * 정의가 서버/클라이언트 사이에 어긋나(그리드 크기 불일치) 실제 버그가
+ * 났으므로, 이 값이 서버 쪽과 일치하는지 검증하는 테스트를 반드시 둔다
+ * (Task 10). */
+export function isConveyorCell(_grid: GridSize, x: number, y: number): boolean {
+  return y === BELT_ROW && x >= BELT_START_X && x <= BELT_END_X
 }
 
-/** 벨트 칸 하나가 어느 그리드 방향으로 "흐르는" 것처럼 그려야 하는지 —
- * U자 모양(위→왼쪽→아래, 오른쪽 두 끝은 열림)을 따라 하나로 이어지는
- * 순환처럼 보이도록 변마다 방향을 고정한다: 위쪽 변은 왼쪽으로, 왼쪽 변은
- * 아래로, 아래쪽 변은 오른쪽(열린 쪽)으로. 모서리는 x===0 검사를 먼저 해서
- * 왼쪽 변에 이어지는 방향을 우선한다(단, 왼쪽-아래 모서리는 예외적으로
- * 아래쪽 변 방향을 따라야 순환이 안 끊긴다). 벨트가 아닌 칸은 null. */
+export function isWarehouseCell(_grid: GridSize, _x: number, y: number): boolean {
+  return WAREHOUSE_ROWS.includes(y)
+}
+
+/** 벨트는 이제 항상 오른쪽(+x)으로만 흐른다 — U자 순환이 없어졌으니
+ * 방향 계산도 훨씬 단순해졌다. */
 export function conveyorFlowDirection(grid: GridSize, x: number, y: number): { dx: number; dy: number } | null {
   if (!isConveyorCell(grid, x, y)) {
     return null
   }
-  if (x === 0 && y !== grid.height - 1) {
-    return { dx: 0, dy: 1 }
-  }
-  if (y === grid.height - 1) {
-    return { dx: 1, dy: 0 }
-  }
-  return { dx: -1, dy: 0 }
+  return { dx: 1, dy: 0 }
 }
 
 /** z-order 오름차순 — 화면 안쪽(작은 x+y)부터 그려서, 앞쪽(큰 x+y) 로봇이
@@ -52,6 +52,8 @@ export interface DrawSceneInput {
   grid: GridSize
   conveyor: ConveyorView
   robots: InterpolatedRobot[]
+  products: InterpolatedProduct[]
+  stations: StationView[]
   showPaths: boolean
   animationTimeMs: number
   selectedRobotId: number | null
@@ -65,11 +67,29 @@ export function drawScene(ctx: CanvasRenderingContext2D, canvasWidth: number, ca
 
   drawFloor(ctx, input.grid, input.conveyor, input.animationTimeMs)
 
+  for (const product of input.products) {
+    drawProduct(ctx, product)
+  }
+
   for (const robot of sortRobotsForDrawing(input.robots)) {
     if (input.showPaths) {
       drawPath(ctx, robot)
     }
     drawRobot(ctx, robot, robot.id === input.selectedRobotId)
+  }
+
+  // 로봇 루프 뒤에 그린다 — 이 경고는 그 로봇 위에 얹히는 오버레이라
+  // 로봇의 센서 헤드 블록(drawRobot, bodyTopY-2~+5)보다 항상 위(나중)에
+  // 그려져야 한다. 예전엔 로봇 루프보다 먼저 그렸는데, 로봇 몸통이 서
+  // 있을 때 헤드 블록이 이 삼각형의 밑변 ~4px를 덮어써 뾰족한 끝만 보이는
+  // 시각 버그가 있었다(코드 리뷰에서 실측 재현: 재고 0은 흔한 정상
+  // 상태라 매 프레임 발생). `Failed` 로봇 경고 삼각형(drawRobot 내부,
+  // warnY = bodyTopY - 10)처럼 오프셋을 더 키워 여유를 주는 방법도
+  // 있었지만, 그러면 BODY_HEIGHT/bodyLift가 바뀔 때마다 또 손으로
+  // 맞춰야 한다 — 그리기 순서를 뒤로 미는 쪽이 기하학적 상수에
+  // 의존하지 않아 더 견고하다.
+  for (const station of input.stations) {
+    drawStationInventoryWarning(ctx, station)
   }
 
   ctx.restore()
@@ -80,7 +100,8 @@ function drawFloor(ctx: CanvasRenderingContext2D, grid: GridSize, conveyor: Conv
     for (let x = 0; x < grid.width; x++) {
       const screen = gridToScreen(x, y)
       const direction = conveyorFlowDirection(grid, x, y)
-      drawTile(ctx, screen.x, screen.y, direction, conveyor.running, animationTimeMs)
+      const warehouse = isWarehouseCell(grid, x, y)
+      drawTile(ctx, screen.x, screen.y, direction, warehouse, conveyor.running, animationTimeMs)
     }
   }
 }
@@ -90,6 +111,7 @@ function drawTile(
   sx: number,
   sy: number,
   direction: { dx: number; dy: number } | null,
+  warehouse: boolean,
   running: boolean,
   animationTimeMs: number,
 ): void {
@@ -107,6 +129,9 @@ function drawTile(
   if (isBelt) {
     gradient.addColorStop(0, '#5b84c9')
     gradient.addColorStop(1, '#33538f')
+  } else if (warehouse) {
+    gradient.addColorStop(0, '#8f5fc9')
+    gradient.addColorStop(1, '#5f3d8f')
   } else {
     gradient.addColorStop(0, '#4a9d6f')
     gradient.addColorStop(1, '#2c6b47')
@@ -169,6 +194,90 @@ function drawConveyorChevrons(
   const offset = (animationTimeMs / 20) % cycle
   drawChevronAt(offset - cycle / 2)
   drawChevronAt(offset)
+}
+
+/** 제품(드론) 단계별 스프라이트 — 브레인스토밍 목업(product-progression.html)의
+ * SVG 모양을 캔버스 그리기로 그대로 옮긴 것. stage가 오를수록 프레임 위에
+ * 부품이 하나씩 늘어난다. */
+function drawProduct(ctx: CanvasRenderingContext2D, product: InterpolatedProduct): void {
+  const screen = gridToScreen(product.renderPos.x, product.renderPos.y)
+  ctx.save()
+  ctx.translate(screen.x, screen.y - 6) // 바닥보다 살짝 띄워서 로봇 팔 높이와 겹치지 않게
+
+  // 프레임(X자 팔) — 0단계부터 항상 보인다.
+  ctx.strokeStyle = '#565e68'
+  ctx.lineWidth = 3
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(-7, -4)
+  ctx.lineTo(7, 4)
+  ctx.moveTo(7, -4)
+  ctx.lineTo(-7, 4)
+  ctx.stroke()
+
+  // 배터리(stage >= 1). 로봇이 물건을 들었을 때 그리는 화물 아이콘
+  // (drawRobot, 아래 `if (robot.carrying)` 블록)과 우연히 같은 색(#c9762f)을
+  // 썼다가, 그 색만으로 "이 로봇이 carrying인지"를 판정하던 E2E 테스트
+  // (`client/tests/e2e/render.spec.ts`)가 벨트 위 아무 제품이나 stage>=1이
+  // 되는 순간 캔버스 어딘가에 같은 색이 나타나 오탐하는 실제 버그로
+  // 이어졌다(Task 10 전체 회귀 검증 중 발견 — 3회 연속 재현) — 배터리는
+  // 화물 아이콘과 확실히 구분되는 색으로 바꾼다.
+  if (product.stage >= 1) {
+    ctx.fillStyle = '#2f7fc9'
+    ctx.strokeStyle = '#1c2024'
+    ctx.lineWidth = 1
+    ctx.fillRect(-4, -3, 8, 6)
+    ctx.strokeRect(-4, -3, 8, 6)
+  }
+
+  // 프로펠러 4개(stage >= 2)
+  if (product.stage >= 2) {
+    ctx.strokeStyle = '#8b95a0'
+    ctx.lineWidth = 1.5
+    for (const [cx, cy] of [
+      [-7, -4],
+      [7, -4],
+      [-7, 4],
+      [7, 4],
+    ] as const) {
+      ctx.beginPath()
+      ctx.arc(cx, cy, 3, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+  }
+
+  // 완성 체크(stage >= 3)
+  if (product.stage >= 3) {
+    ctx.strokeStyle = '#ffd23a'
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.arc(0, 0, 6, 0, Math.PI * 2)
+    ctx.stroke()
+  }
+
+  ctx.restore()
+}
+
+/** 재고 0인 스테이션은 조립 로봇 위에 경고색 표시(기존 고장 표시와 같은
+ * 관례 — 빨강 경고 삼각형). 재고가 있으면 아무것도 그리지 않는다. */
+function drawStationInventoryWarning(ctx: CanvasRenderingContext2D, station: StationView): void {
+  if (station.part_inventory > 0) {
+    return
+  }
+  const screen = gridToScreen(station.robot_cell.x, station.robot_cell.y)
+  ctx.save()
+  ctx.translate(screen.x, screen.y - 34)
+  ctx.fillStyle = '#e04b3f'
+  ctx.beginPath()
+  ctx.moveTo(0, -6)
+  ctx.lineTo(5, 4)
+  ctx.lineTo(-5, 4)
+  ctx.closePath()
+  ctx.fill()
+  ctx.strokeStyle = '#1c2024'
+  ctx.lineWidth = 1
+  ctx.stroke()
+  ctx.restore()
 }
 
 const BODY_WIDTH = 26

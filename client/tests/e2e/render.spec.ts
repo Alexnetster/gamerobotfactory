@@ -25,10 +25,7 @@ function backendPort(): number {
 // 테스트(같은 파일이든 다른 파일이든)가 로봇을 스폰해 두면 다음 테스트가
 // 접속했을 때부터 이미 그 로봇이 보인다. 그래서 "+" 클릭 후 카운트를
 // 고정값 '1'로 단언하면 실행 순서에 따라 우연히 통과(혹은 실패)하는
-// 깨지기 쉬운 테스트가 된다 (실측: 두 번째 테스트가 첫 테스트가 남긴 로봇
-// 때문에 시작부터 이미 1이었고, 클릭 이후 실제로는 2가 되어야 정상인데도
-// 타이밍에 따라 assertion이 '1'을 잡아버려 클릭이 아무 효과가 없어도
-// 통과할 뻔한 적이 있었다). 클릭 전 카운트를 읽어 "정확히 +1 됐는지"를
+// 깨지기 쉬운 테스트가 된다. 클릭 전 카운트를 읽어 "정확히 +1 됐는지"를
 // 검증하면 이전 테스트의 잔여 상태와 무관하게 결정적이고, 클릭이 실제로
 // 효과를 냈다는 것도 확실히 검증된다.
 //
@@ -38,9 +35,42 @@ function backendPort(): number {
 // 아니라 "호출 전후 델타"로 검증하거나, 이 파일의 상태와 명시적으로
 // 조율해야 한다 — 그렇지 않으면 서로 다른 파일의 동시 실행이 같은
 // 서버측 카운터를 두고 경쟁해 간헐적으로만 재현되는 flaky 테스트가 된다.
-async function currentRobotCount(page: import('@playwright/test').Page): Promise<number> {
-  const text = await page.locator('.robot-count').textContent()
-  return Number(text)
+//
+// "before" 카운트는 `page.locator('.robot-count').textContent()`로 페이지
+// DOM에서 읽지 않는다 — Task 10 전체 회귀 검증 중 실측된 진짜 버그: 조립
+// 라인 모델에서 `.robot-count`는 페이지의 `main()`이 `connection.connect()`
+// 직후 로컬의 빈 mirror(헬퍼 0명)로 한 번 동기적으로 렌더링해 두고
+// (`main.ts`), 그 뒤 실제 첫 Snapshot이 WS 왕복을 거쳐 도착해야 진짜 값으로
+// 갱신된다. `page.goto()`가 반환하는 시점(load 이벤트)은 이 WS 왕복보다
+// 먼저 오는 경우가 사실상 항상이라, 서버에 이미 헬퍼가 누적돼 있어도(같은
+// 서버를 여러 테스트가 공유하므로 두 번째 테스트부터는 항상 그렇다)
+// `currentRobotCount(page)`는 거의 매번 "0"을 읽었다 — 신선한 서버로
+// 3회 연속 전체 스위트를 재실행해 100% 재현 확인(맨 처음 테스트만 실제
+// 카운트가 우연히 0이라 통과, 이후 테스트는 전부 `before`를 0으로 오독해
+// 최종 값이 기대치보다 큰 채로 실패). 대신 이 테스트 파일 전용의 진짜 WS
+// 연결을 열어 서버가 보내는 권위 있는 Snapshot에서 role.kind==='Helper'인
+// 로봇 수를 직접 세어 "before"로 쓴다 — DOM 렌더 타이밍과 완전히 무관하게
+// 항상 그 순간의 실제 서버 상태를 반영한다.
+async function trueHelperCount(port: number): Promise<number> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    const first = await new Promise<ReturnType<typeof parseServerMessage>>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timed out waiting for initial message')), 5000)
+      ws.once('message', (data: Buffer) => {
+        clearTimeout(timeout)
+        resolve(parseServerMessage(data.toString()))
+      })
+    })
+    if (!first) throw new Error('failed to parse initial server message')
+    const mirror = applyServerMessage(createEmptyMirror(), first)
+    return [...mirror.robots.values()].filter((r) => r.role.kind === 'Helper').length
+  } finally {
+    ws.close()
+  }
 }
 
 // Plan 5 Task 7(`server/src/sim.rs`의 로봇 순찰 목표 배정, `59aa06b`) 이후로는
@@ -113,7 +143,7 @@ test.describe('client renders against a real server', () => {
     await page.setViewportSize({ width: 1000, height: 700 })
     await page.goto(`/?ws=ws://127.0.0.1:${backendPort()}/ws`)
 
-    const before = await currentRobotCount(page)
+    const before = await trueHelperCount(backendPort())
     const incButton = page.locator('.sidebar button', { hasText: '+' })
     await incButton.click()
     await expect(page.locator('.robot-count')).toHaveText(String(before + 1), { timeout: 5000 })
@@ -256,7 +286,7 @@ test.describe('client renders against a real server', () => {
     try {
       await page.goto(`/?ws=ws://127.0.0.1:${backendPort()}/ws`)
 
-      const before = await currentRobotCount(page)
+      const before = await trueHelperCount(backendPort())
       const incButton = page.locator('.sidebar button', { hasText: '+' })
       await incButton.click()
       await expect(page.locator('.robot-count')).toHaveText(String(before + 1), { timeout: 5000 })
@@ -318,56 +348,121 @@ test.describe('client renders against a real server', () => {
   })
 
   test('renders a cargo icon on a robot after it completes a pickup', async ({ page }) => {
+    // 이 파일의 세 테스트가 서버 프로세스를 공유하므로(파일 상단 주석),
+    // 이 테스트가 실행될 즈음엔 이미 앞선 두 테스트가 스폰한 헬퍼가
+    // 1~2대 더 있다. 헬퍼 작업 배정은 매 틱 로봇 벡터 순서(=id 오름차순)로
+    // 유휴 헬퍼에게 대기열 맨 앞 작업을 넘기므로(`run_helper_logistics`),
+    // 이번에 새로 스폰한(id가 가장 큰) 헬퍼는 기존 헬퍼들이 전부 동시에
+    // 바쁠 때에만 자기 차례가 온다 — 영구 기아 상태는 아니지만(모든
+    // 헬퍼가 결국 주기적으로 바빠짐/한가해짐을 반복하므로), 기본
+    // 8초보다 오래 걸릴 수 있다는 것을 실측으로 확인(신선한 단독 서버로는
+    // 4/4 통과, 이 파일의 세 번째 테스트로 실행하면 8초 예산으로는 여러
+    // 번 실패) — 기본 30초 테스트 타임아웃보다 넉넉히 여유를 두기 위해
+    // 이 테스트만 45초로 늘린다.
+    test.setTimeout(45_000)
     await page.setViewportSize({ width: 1000, height: 700 })
     await page.goto(`/?ws=ws://127.0.0.1:${backendPort()}/ws`)
 
-    const before = await currentRobotCount(page)
-    const incButton = page.locator('.sidebar button', { hasText: '+' })
-    await incButton.click()
-    await expect(page.locator('.robot-count')).toHaveText(String(before + 1), { timeout: 5000 })
-
-    // 컨베이어는 서버 기본값으로 이미 켜져 있다 — 작업 사이클이 자동으로
-    // 시작돼 픽업을 완료하면 화물을 든다. 이동 거리 + PICK_TICKS(20틱,
-    // 약 1초) 감안해 8초 동안 재시도.
-    const cargoColor = { r: 0xc9, g: 0x76, b: 0x2f }
-    const hasCargoColor = async () => page.evaluate((color) => {
-      const c = document.querySelector('canvas') as HTMLCanvasElement
-      const ctx = c.getContext('2d')!
-      const { width, height } = c
-      const data = ctx.getImageData(0, 0, width, height).data
-      for (let i = 0; i < data.length; i += 4) {
-        if (Math.abs(data[i] - color.r) < 10 && Math.abs(data[i + 1] - color.g) < 10 && Math.abs(data[i + 2] - color.b) < 10) {
-          return true
-        }
-      }
-      return false
-    }, cargoColor)
-
-    // 화물이 처음부터 항상 그려지는 회귀(robot.carrying 가드가 빠지거나
-    // 뒤집히는 경우)를 잡기 위해, 픽업이 끝나기 전에는 화물 아이콘이
-    // 아직 안 보이는지부터 확인한다. 스폰 직후(PICK_TICKS=20틱, 약 1초
-    // 미만 경과) 시점이라 이 시점엔 아직 픽업이 끝났을 리 없다.
+    // 이 테스트 전용 관찰 WS 연결 — 새로 스폰한 헬퍼 로봇 "그 하나"의
+    // 서버 권위 `carrying` 필드와 화면 좌표를 직접 계산하기 위함.
     //
-    // `.robot-count` 텍스트는 사이드바 DOM 갱신(서버 브로드캐스트 수신 시
-    // 바로 반영)만으로 확정되고, 캔버스는 별도의 requestAnimationFrame
-    // 루프가 그 다음 프레임에 그린다 — 그래서 텍스트 확인 직후 곧바로
-    // `hasCargoColor()`를 호출하면 새로 스폰된 로봇이 아직 캔버스에 한 번도
-    // 그려지기 전이라 화물 유무와 무관하게 항상 false가 나오는 레이스가
-    // 있었다(뮤테이션 `if (true || robot.carrying)`으로 실측: 3회 중 1회
-    // 이 경합 때문에 뮤턴트를 못 잡고 조용히 통과함). 최소 두 번의 실제
-    // 페인트가 끝난 뒤 상태를 읽도록 두 번의 `requestAnimationFrame`을
-    // 명시적으로 기다려서, "아직 안 그려짐"이 아니라 "그려졌는데 화물이
-    // 없음"을 검증하게 고쳤다.
-    await page.evaluate(() => new Promise<void>((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-    }))
-    expect(await hasCargoColor()).toBe(false)
+    // Task 10 전체 회귀 검증 중 실제로 깨진 이전 버전의 진짜 원인: 이
+    // 파일의 세 테스트는 하나의 백엔드 서버 프로세스를 공유한다(파일 상단
+    // 주석 참고). 이전 버전은 캔버스 전체를 화물 색(#c9762f)으로
+    // 래스터스캔했는데, 앞선 테스트들이 스폰해 둔 다른 헬퍼들도 이
+    // 테스트가 실행되는 동안 각자의 픽업 사이클을 계속 돌고 있어서(백엔드
+    // 틱 루프는 WS 연결 여부와 무관하게 계속 돈다) 그 로봇들의 화물
+    // 아이콘이 화면 다른 곳에 나타나며 "새로 스폰한 로봇이 화물을
+    // 들었다"고 오판했다(신선한 서버 단독 실행 시 4/4 통과, 전체 스위트
+    // 순서대로 실행 시 3/3 재현 실패로 확인). 부수적으로 제품 배터리
+    // 스프라이트도 우연히 같은 색을 쓰고 있어(`render/canvas.ts::drawProduct`)
+    // 함께 고쳤다. 이 관찰용 연결은 "이번에 새로 스폰한 로봇" 하나의
+    // 실제 `carrying`(서버 권위)만 짚어내는 데 쓴다 — 화면 좌표 예측은
+    // 아래에서 다시 설명하듯 포기했다.
+    const ws = new WebSocket(`ws://127.0.0.1:${backendPort()}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve())
+      ws.once('error', reject)
+    })
+    let mirror: MirrorState = createEmptyMirror()
+    ws.on('message', (data: Buffer) => {
+      const message = parseServerMessage(data.toString())
+      if (!message) return
+      mirror = applyServerMessage(mirror, message)
+    })
 
-    let found = false
-    for (let attempt = 0; attempt < 40 && !found; attempt++) {
-      found = await hasCargoColor()
-      if (!found) await page.waitForTimeout(200)
+    try {
+      const before = await trueHelperCount(backendPort())
+      const incButton = page.locator('.sidebar button', { hasText: '+' })
+      await incButton.click()
+      await expect(page.locator('.robot-count')).toHaveText(String(before + 1), { timeout: 5000 })
+
+      // 새로 스폰된 헬퍼는 헬퍼 로봇 중 id가 가장 큰 로봇이다 — id는 항상
+      // 증가만 하고 재사용되지 않는다(`set_robot_count_assigns_unique_growing_ids`).
+      const helperDeadline = Date.now() + 8000
+      let newRobotId: number | null = null
+      while (Date.now() < helperDeadline) {
+        const helperIds = [...mirror.robots.values()].filter((r) => r.role.kind === 'Helper').map((r) => r.id)
+        if (helperIds.length >= before + 1) {
+          newRobotId = Math.max(...helperIds)
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      if (newRobotId === null) throw new Error('new helper robot did not appear in the mirror in time')
+
+      // 화물이 처음부터 항상 그려지는 회귀(robot.carrying 가드가 빠지거나
+      // 뒤집히는 경우)를 잡기 위해, 픽업이 끝나기 전에는 이 로봇이 아직
+      // carrying:false인지부터 확인한다.
+      expect(mirror.robots.get(newRobotId)?.carrying).toBe(false)
+
+      // 헬퍼가 창고까지 걸어가 픽업을 마칠 때까지 기다린다. 이동거리 +
+      // HELPER_PICKUP_TICKS(20틱) 자체는 20Hz 기준 2초 안팎이지만, 이미
+      // 존재하는 다른 헬퍼들과 대기열을 두고 경쟁할 수 있어(위 test.setTimeout
+      // 주석 참고) 넉넉히 20초로 잡는다.
+      const carryDeadline = Date.now() + 20000
+      let carrying = false
+      while (Date.now() < carryDeadline && !carrying) {
+        carrying = mirror.robots.get(newRobotId)?.carrying === true
+        if (!carrying) await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      expect(carrying).toBe(true)
+
+      // 서버 데이터로 "우리 로봇이 지금 carrying:true"임을 이미 확인했으니,
+      // 남은 건 클라이언트 렌더링 파이프라인이 실제로 화물 아이콘을
+      // 그리는지(canvas.ts::drawRobot의 `if (robot.carrying)` 블록이 실제
+      // 실행되는지)뿐이다 — 이번엔 화면 전체를 스캔해도 안전하다: 모든
+      // 로봇이 같은 `drawRobot` 함수를 공유하므로(로봇마다 다른 렌더
+      // 코드 경로가 없음), 화면 어디에서든 화물 색이 발견되면 그 코드
+      // 경로가 실행됐다는 뜻이고, 애초에 "어떤 로봇도 carrying이 아닌데
+      // 화물이 그려지는" 회귀(위 새 로봇의 before 단언이 이미 데이터
+      // 레벨로 잡음)와는 별개로 순수 렌더링 스모크 체크다. 특정 로봇의
+      // "지금 이 순간" 화면 좌표를 우리 쪽 별도 WS 미러로 예측해 그
+      // 주변 좁은 박스만 읽는 방식은 실측으로 폐기했다 — 헤드리스
+      // Chromium의 `getImageData()` 캔버스 리드백이 로봇의 실제 이동
+      // 속도(~700px/s) 기준으로 무시 못 할 만큼 논리적 상태보다 뒤처져서
+      // (이 파일 상단 주석의 클릭 테스트 조사 이력과 같은 근본 원인),
+      // 좁은 박스를 매번 빗나가는 실패가 실측됐다.
+      const cargoColor = { r: 0xc9, g: 0x76, b: 0x2f }
+      let renderedCargo = false
+      for (let attempt = 0; attempt < 20 && !renderedCargo; attempt++) {
+        renderedCargo = await page.evaluate((color) => {
+          const c = document.querySelector('canvas') as HTMLCanvasElement
+          const ctx = c.getContext('2d')!
+          const { width, height } = c
+          const data = ctx.getImageData(0, 0, width, height).data
+          for (let i = 0; i < data.length; i += 4) {
+            if (Math.abs(data[i] - color.r) < 10 && Math.abs(data[i + 1] - color.g) < 10 && Math.abs(data[i + 2] - color.b) < 10) {
+              return true
+            }
+          }
+          return false
+        }, cargoColor)
+        if (!renderedCargo) await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      expect(renderedCargo).toBe(true)
+    } finally {
+      ws.close()
     }
-    expect(found).toBe(true)
   })
 })

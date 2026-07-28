@@ -57,28 +57,36 @@ async fn connects_and_receives_initial_snapshot_then_reacts_to_commands() {
     let Message::Text(text) = first else { panic!("expected text message") };
     let json: Value = serde_json::from_str(&text).expect("initial message should be valid JSON");
     assert_eq!(json["kind"], "Snapshot");
-    assert_eq!(json["robots"].as_array().expect("robots should be an array").len(), 0);
+    assert_eq!(
+        json["robots"].as_array().expect("robots should be an array").len(),
+        3,
+        "서버는 항상 조립 로봇 3대로 시작해야 한다"
+    );
 
-    // 2) SetRobotCount 커맨드를 보낸다.
+    // 2) SetRobotCount 커맨드를 보낸다. 조립 라인 모델에서 이 카운트는
+    //    "헬퍼 로봇 수"만 가리킨다(조립 로봇 3대는 사용자가 조절할 수
+    //    없다) — 그래서 목표 헬퍼 수는 2다.
     write
         .send(Message::Text(r#"{"type":"SetRobotCount","count":2}"#.to_string()))
         .await
         .unwrap();
 
-    // 3) 다음 틱 브로드캐스트(델타)에서 로봇 2대가 등장하는지 확인한다.
-    //    틱 주기가 50ms이므로 몇 번의 메시지 안에는 반영되어야 한다.
-    //    실제 JSON을 파싱해 `changed_robots` 배열 길이를 확인한다(부분
-    //    문자열 매칭보다 정확하고, `removed_robot_ids` 같은 다른 키의
-    //    이름에 우연히 걸릴 여지가 없다). 전체 폴링 루프를 데드라인으로
-    //    감싸서, 델타 브로드캐스트가 회귀해도 무한정 멈춰있는 대신
-    //    빠르게 실패하도록 한다.
-    let saw_two_robots = tokio::time::timeout(Duration::from_secs(5), async {
+    // 3) 다음 틱 브로드캐스트(델타)에서 헬퍼 로봇 2대가 새로 등장하는지
+    //    확인한다. 델타는 "바뀐" 로봇만 담으므로 누적 카운트가 아니라,
+    //    이번 메시지에 role.kind == "Helper"인 로봇이 정확히 2대 있는지를
+    //    직접 확인한다(조립 로봇 3대는 이미 최초 스냅샷에 있었고 이번
+    //    변경으로 다시 안 바뀌므로 changed_robots에 안 실린다). 틱 주기가
+    //    50ms이므로 몇 번의 메시지 안에는 반영되어야 한다. 전체 폴링
+    //    루프를 데드라인으로 감싸서, 델타 브로드캐스트가 회귀해도
+    //    무한정 멈춰있는 대신 빠르게 실패하도록 한다.
+    let saw_two_new_helpers = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let Some(Ok(Message::Text(text))) = read.next().await else { return false };
             let Ok(json) = serde_json::from_str::<Value>(&text) else { continue };
             if json["kind"] == "Delta" {
                 if let Some(changed) = json["changed_robots"].as_array() {
-                    if changed.len() >= 2 {
+                    let helper_count = changed.iter().filter(|r| r["role"]["kind"] == "Helper").count();
+                    if helper_count == 2 {
                         return true;
                     }
                 }
@@ -87,7 +95,7 @@ async fn connects_and_receives_initial_snapshot_then_reacts_to_commands() {
     })
     .await
     .unwrap_or(false);
-    assert!(saw_two_robots, "expected a delta message reflecting 2 robots after SetRobotCount");
+    assert!(saw_two_new_helpers, "expected a delta message reflecting 2 new helper robots after SetRobotCount");
 }
 
 #[tokio::test]
@@ -290,13 +298,15 @@ async fn carrying_flag_flows_over_the_wire_during_a_work_cycle() {
     write.send(Message::Text(r#"{"type":"SetRobotCount","count":1}"#.to_string())).await.unwrap();
 
     // Snapshot과 Delta 양쪽 모두에서 로봇 배열을 찾아, 그 중 하나라도
-    // carrying:true를 가진 로봇을 보고하면 성공으로 친다. 로봇 id 0의
-    // 스폰 지점(0,0)이 work_points(0, ..)의 픽업 지점과 우연히 일치해서
-    // (deterministic_roll(0, ..)이 항상 0을 내므로) 이 테스트는 실제로는
-    // 이동 없이 곧바로 PICK_TICKS(20틱, 20Hz 기준 약 1초)만 기다린다 —
-    // 그래도 데드라인은 실제 그리드(9x7) 최악의 이동 거리(대각선 최대
-    // (9-1)+(7-1)=14칸, ~42틱)까지 감안해 넉넉히 8초로 잡는다(다른 id로
-    // 바뀌거나 그리드 크기가 바뀌어도 안전하게 통과하도록).
+    // carrying:true를 가진 로봇을 보고하면 성공으로 친다. 조립 라인
+    // 모델에서 `carrying`은 헬퍼 로봇에서만 뒤집힌다(`RobotRole::Assembly`
+    // 분기는 이 필드를 건드리지 않는다, `server/src/sim.rs::plan_robot`
+    // 참고) — 조립 로봇 3대는 항상 존재하지만 여기서 추가한 헬퍼 1대가
+    // 창고까지 걸어가 첫 프레임(라인 시작점이 비어있으므로 `DeliverFrame`이
+    // 즉시 큐에 들어간다)을 집어드는 순간 carrying이 true가 된다. 데드라인은
+    // 실제 그리드(9x7) 최악의 이동 거리(대각선 최대 (9-1)+(7-1)=14칸,
+    // ~14틱) + 헬퍼 픽업 카운트다운(`HELPER_PICKUP_TICKS`=20틱)까지 감안해
+    // 넉넉히 8초(160틱)로 잡는다.
     let saw_carrying_true = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let Some(Ok(Message::Text(text))) = read.next().await else { return false };

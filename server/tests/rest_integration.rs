@@ -130,9 +130,14 @@ async fn stats_history_reflects_persisted_rows_after_running() {
 }
 
 #[tokio::test]
-#[ignore = "exercises the old free-roam cycle removed in Task 2; rewritten for the assembly-line model in a later task"]
-async fn production_only_increases_after_a_robot_completes_a_full_work_cycle() {
-    let db_path = temp_db_path("production-cycle");
+async fn production_increases_once_a_full_drone_completes_the_line() {
+    // 옛 자유이동 픽업/배치 사이클 전제(이 테스트의 예전 이름
+    // `production_only_increases_after_a_robot_completes_a_full_work_cycle`,
+    // `PICK_TICKS`/`PLACE_TICKS`/`ROBOT_COUNT` 기반 상한 계산)를 조립
+    // 라인 모델로 재작성했다 — 이제 로봇은 자유이동으로 픽업/배치하지
+    // 않고, 헬퍼가 프레임을 배달하면 그 제품이 스테이션 3개를 거치며
+    // 조립되고 벨트 끝에서 반출된다(설계문서 §5, §7).
+    let db_path = temp_db_path("production-line");
     let server = spawn_server_with_isolated_db(&db_path);
     let base = format!("http://127.0.0.1:{}", server.port);
     let client = reqwest::Client::new();
@@ -144,10 +149,10 @@ async fn production_only_increases_after_a_robot_completes_a_full_work_cycle() {
         .await
         .expect("POST /api/config failed");
 
-    // ToggleConveyor 없이도 서버 기본값(Conveyor::new()의 running: true)이
-    // 이미 켜져 있으므로 로봇 수만 늘리면 곧바로 작업 사이클이 시작된다.
-    // 픽업 지점까지의 이동 + PICK_TICKS(20) + 배치 지점까지의 이동 +
-    // PLACE_TICKS(20)를 감안해 넉넉히 6초 기다린다.
+    // 조립 로봇 3대는 서버 시작 시 이미 항상 존재한다 — SetRobotCount는
+    // 헬퍼 수만 조절한다(설계문서 §4). 헬퍼가 있어야 창고에서 프레임을
+    // 라인 시작점으로 배달하고 스테이션 재고를 보충하므로, 헬퍼 없이는
+    // 라인이 아예 돌지 않는다.
     let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/ws", server.port))
         .await
         .expect("failed to connect WS");
@@ -160,7 +165,11 @@ async fn production_only_increases_after_a_robot_completes_a_full_work_cycle() {
         .await
         .expect("failed to send SetRobotCount");
 
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    // 헬퍼가 첫 프레임을 배달하고, 세 스테이션을 각각 조립 카운트다운
+    // (ASSEMBLY_TICKS)만큼 거쳐 완성/반출되기까지 넉넉히 기다린다 —
+    // 정확한 틱 수 대신 "이 정도면 충분히 여러 사이클이 돌고도 남는다"는
+    // 넉넉한 벽시계 타임아웃(기존 REST 통합테스트들과 같은 패턴).
+    tokio::time::sleep(Duration::from_secs(8)).await;
 
     let history: Vec<serde_json::Value> = client
         .get(format!("{base}/api/stats/history"))
@@ -171,27 +180,9 @@ async fn production_only_increases_after_a_robot_completes_a_full_work_cycle() {
         .await
         .expect("response was not valid JSON");
 
-    let total_production_ever: f64 = history.iter().filter_map(|row| row["total_production"].as_f64()).sum();
-    assert!(total_production_ever > 0.0, "expected at least one robot to complete a full pick/place cycle within 6 seconds, got rows: {history:?}");
+    let max_production = history.iter().filter_map(|row| row["total_production"].as_f64()).fold(0.0_f64, f64::max);
 
-    // A full pick+place cycle takes at least PICK_TICKS + PLACE_TICKS ticks
-    // (ignoring travel time, which only makes cycles slower/fewer). At 20Hz,
-    // 6 seconds is at most 120 ticks, so no robot can complete more than
-    // 120 / (PICK_TICKS + PLACE_TICKS) full cycles in this window even in
-    // the best case (already standing on the pickup/place point every time).
-    // +1 cycle of slack per robot absorbs legitimate timing jitter (test
-    // scheduling delays, GET latency) without absorbing an order-of-magnitude
-    // regression like crediting every robot on every tick.
-    const ROBOT_COUNT: u32 = 3;
-    const TEST_WINDOW_TICKS: u32 = 20 * 6; // 20Hz tick rate, 6s sleep
-    let max_cycles_per_robot = TEST_WINDOW_TICKS / (sim_core::sim::PICK_TICKS + sim_core::sim::PLACE_TICKS) + 1;
-    let max_plausible_production =
-        ROBOT_COUNT as f64 * max_cycles_per_robot as f64 * sim_core::sim::UNIT_PER_CYCLE as f64;
-
-    assert!(
-        total_production_ever <= max_plausible_production,
-        "production grew far faster than a real pick/place cycle allows ({total_production_ever} > {max_plausible_production}) — likely crediting robots that haven't actually completed a placement, got rows: {history:?}"
-    );
+    assert!(max_production > 0.0, "expected at least one drone to complete the line within 8 seconds, got rows: {history:?}");
 
     let _ = std::fs::remove_file(&db_path);
 }

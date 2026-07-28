@@ -23,6 +23,20 @@ export type WireStatus =
   | { kind: 'Failed' }
   | { kind: 'Repairing'; remaining_ticks: number }
 
+export type WireRobotRole = { kind: 'Assembly'; station_index: number } | { kind: 'Helper' }
+
+export interface StationView {
+  index: number
+  robot_cell: WireCellId
+  part_inventory: number
+}
+
+export interface ProductView {
+  id: number
+  stage: number
+  pos: WireCellId
+}
+
 export interface RobotView {
   id: number
   pos: WireCellId
@@ -35,6 +49,7 @@ export interface RobotView {
   facing: WireDirection
   arm_pose: WireArmPose
   carrying: boolean
+  role: WireRobotRole
 }
 
 export interface ConveyorView {
@@ -42,7 +57,16 @@ export interface ConveyorView {
 }
 
 export type ServerMessage =
-  | { kind: 'Snapshot'; v: number; tick: number; session_id: string; conveyor: ConveyorView; robots: RobotView[] }
+  | {
+      kind: 'Snapshot'
+      v: number
+      tick: number
+      session_id: string
+      conveyor: ConveyorView
+      robots: RobotView[]
+      stations: StationView[]
+      products: ProductView[]
+    }
   | {
       kind: 'Delta'
       v: number
@@ -50,6 +74,9 @@ export type ServerMessage =
       conveyor: ConveyorView | null
       changed_robots: RobotView[]
       removed_robot_ids: number[]
+      stations: StationView[]
+      changed_products: ProductView[]
+      removed_product_ids: number[]
     }
   | { kind: 'ResumeAck'; v: number; session_id: string; resumed: boolean }
 

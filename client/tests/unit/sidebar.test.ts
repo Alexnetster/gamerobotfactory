@@ -17,6 +17,7 @@ function robot(overrides: Partial<RobotView> = {}): RobotView {
     facing: 'East',
     arm_pose: { shoulder_angle: 0, elbow_angle: 0 },
     carrying: false,
+    role: { kind: 'Helper' },
     ...overrides,
   }
 }
@@ -164,5 +165,14 @@ describe('Sidebar', () => {
     button.click()
 
     expect(onToggleConveyor).toHaveBeenCalledOnce()
+  })
+
+  it('labels the robot-count control as "헬퍼 로봇 수" now that the count excludes the 3 fixed Assembly robots', () => {
+    const container = document.createElement('div')
+    const sidebar = makeSidebar(container)
+
+    sidebar.update({ connection: { kind: 'open' }, conveyor: { running: true }, robotCount: 2, selectedRobot: null, pathDebugEnabled: false })
+
+    expect(container.textContent).toContain('헬퍼 로봇 수')
   })
 })

@@ -5,6 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const LEG_CYCLE_SPEED: f32 = 0.1;
+// 헬퍼가 경로를 다시 계산하기 전 기존 경로를 유지하는 최소 틱 수 —
+// 매 틱 재계산하면 낭비이므로(길찾기가 A*라 상대적으로 비쌈), 어느 정도
+// 오래된 점유 스냅샷 기반 경로도 허용한다(헬퍼는 순찰보다 목적지가
+// 명확해 짧은 지연은 문제되지 않음).
 const REPATH_INTERVAL: u32 = 10;
 // 1000초(약 17분) 분량의 작업(20Hz 기준) — 튜닝 대상. 2000(100초) →
 // 6000(5분)으로 한 번 완화했으나, 실사용 피드백("수리 후에도 금방 다시
@@ -33,6 +37,39 @@ pub const BELT_END_X: i32 = 7; // 이 칸에 도달한 제품은 반출(완성)�
 pub const STATION_XS: [i32; STATION_COUNT] = [2, 4, 6];
 pub const STATION_ROBOT_ROW: i32 = 2; // 벨트(y=3) 바로 위, 벨트 칸이 아님
 pub const WAREHOUSE_CELL: CellId = (4, 0); // 헬퍼 로봇의 대표 출발/도착 칸(창고 구역 y=0..=1 중 하나)
+
+/// 새로 스폰되는 헬퍼가 유휴 상태로 서 있을 수 있는 칸들(창고 구역
+/// y=0..=1 안, `WAREHOUSE_CELL` 자체와는 다른 칸). 실제 픽업/드롭 거래는
+/// 여전히 `WAREHOUSE_CELL` 하나만 쓴다 — 이 배열은 오직 "새로 만들어진
+/// 헬퍼가 처음에 어디 서 있는가"만 바꾼다.
+///
+/// 왜 필요한가: `plan_helper`는 `helper_assignment == None`인(아직 아무
+/// 작업도 배정 못 받은) 헬퍼를 완전히 가만히 둔다(절대 이동하지 않음,
+/// 아래 참고). `game_state.rs::set_robot_count`로 헬퍼가 여러 대 추가돼도
+/// 동시에 대기 중인 작업은 보통 하나뿐이라(스테이션 `STATION_COUNT`개 +
+/// `DeliverFrame` 하나), 헬퍼 수가 대기 작업 수보다 많아지면 나머지는
+/// 영구히 유휴 상태로 남는다. 예전엔 이 유휴 헬퍼들을 전부
+/// `WAREHOUSE_CELL` 자체에 스폰했는데, 그 칸은 활성 헬퍼가 실제 픽업을
+/// 하러 반드시 도달해야 하는 칸이다 — `find_path`는 목표 칸이 점유돼
+/// 있어도 그쪽으로 향하는 경로 자체는 허용하지만(pathfind.rs 참고, "그
+/// 로봇이 다음 틱에 비킬 수도 있으므로"), `advance_along_path`의 마지막
+/// 한 칸 진입은 여전히 `!occupied.contains(&next_cell)`로 막힌다 — 유휴
+/// 헬퍼가 `WAREHOUSE_CELL`을 영구 점거하면 그 마지막 한 칸이 영원히
+/// 열리지 않아 활성 헬퍼가 도착 직전에서 영원히 멈추고, 그 헬퍼가 물고
+/// 있던 작업이 끝나지 않으니 라인 전체가 멈춘다(실측된 배포 정지 버그,
+/// `6576653` 커밋을 bisect해서 확인). 스폰 위치만 이 배열로 분산시키면
+/// 유휴 헬퍼끼리는 서로 몇 명이 겹쳐도(트랜잭션 칸이 아니므로) 문제가
+/// 없다.
+///
+/// `set_robot_count`가 새로 배정하는 로봇 id를 이 배열 길이로 나눈
+/// 나머지로 인덱싱해서 스폰 칸을 고른다 — id는 항상 증가만 하므로(재사용
+/// 없음, `set_robot_count_assigns_unique_growing_ids` 테스트가 이미
+/// 보장) 한 번의 `set_robot_count` 호출로 여러 대가 한꺼번에 스폰돼도
+/// 이 배열 길이만큼은 서로 겹치지 않는다. 그 이상(예: 배열 길이보다 많은
+/// 헬퍼가 한 번에 스폰되거나, `MAX_ROBOT_COUNT`에 가까운 극단적으로 많은
+/// 헬퍼 수) 겹치는 건 감수한다 — 겹쳐도 문제되는 칸은 여전히
+/// `WAREHOUSE_CELL` 자체뿐이고, 그 칸은 이 배열에 없으므로 안전하다.
+pub const HELPER_SPAWN_STAGING_CELLS: [CellId; 6] = [(0, 0), (2, 0), (6, 0), (8, 0), (1, 1), (7, 1)];
 pub const STATION_MAX_INVENTORY: u32 = 5;
 pub const ASSEMBLY_TICKS: u32 = 20; // 조립 로봇의 스테이션당 작업 시간 — 튜닝 대상
 pub const HELPER_PICKUP_TICKS: u32 = 20; // 헬퍼가 창고에서 집어드는 시간 — 튜닝 대상
@@ -270,8 +307,47 @@ impl Station {
     }
 }
 
+// 헬퍼의 실제 목적지(`station_handoff_cell`, 아래)와 조립 로봇 자리를
+// 구분해서 테스트에 명확히 드러내기 위한 헬퍼 — 프로덕션 코드는 이제
+// 이 칸을 직접 계산하지 않는다(`Station::new`가 `robot_cell` 필드를
+// 인라인으로 채움, `plan_helper`/`run_helper_logistics`는 아래
+// `station_handoff_cell`을 쓴다) — 그래서 `#[cfg(test)]`.
+#[cfg(test)]
 fn station_robot_cell(station_index: u8) -> CellId {
     (STATION_XS[station_index as usize], STATION_ROBOT_ROW)
+}
+
+/// `RestockStation`이 실제로 걸어가는 목적지 — 조립 로봇이 영구히 서
+/// 있는 `station_robot_cell` 자체가 아니라 그 한 칸 위(벨트에서 더 먼
+/// 쪽, 창고 구역 y=0..=1 안)다. `STATION_ROBOT_ROW - 1`은 설계문서 §1의
+/// 고정 레이아웃(창고 구역은 조립 로봇 줄보다 한 칸 위)에서 나온 상수라
+/// 튜닝 대상이 아니다.
+///
+/// 왜 필요한가(실측된 배포 정지 버그): 조립 로봇 3대는 스폰 직후
+/// `station.robot_cell`에 영구 고정되고 `plan_robot`의 `Assembly` 분기가
+/// 절대 이동시키지 않는다(위 `RobotRole` 문서 참고) — `GameState::new`가
+/// 이 3대를 항상 자동 스폰하므로 실제 플레이에서 그 칸은 항상 점유돼
+/// 있다. `advance_along_path`의 마지막 한 칸 진입은
+/// `!occupied.contains(&next_cell)`로 막히므로(`HELPER_SPAWN_STAGING_CELLS`
+/// 문서의 같은 규칙), 목적지가 `station_robot_cell`과 정확히 같으면
+/// 헬퍼는 그 한 칸 앞에서 영원히 멈추고 드롭을 완료할 수 없다 —
+/// `part_inventory`가 0에서 절대 안 올라가고 라인 전체가 멈춘다(실측:
+/// 실제 서버를 띄우고 WebSocket으로 관찰, 스테이션 3개 전부 재고 0, 헬퍼
+/// 3대 전부 `carrying: true`로 500틱 이상 정지). 기존 `helper_restocks_a_
+/// station_end_to_end` 테스트가 이 버그를 못 잡은 이유는 그 테스트가
+/// 조립 로봇 없이 헬퍼 하나만 있는 `SimState`를 만들어서 목적지 칸이
+/// 실제로는 비어 있었기 때문 — `helper_restocks_alongside_its_stationary_
+/// assembly_robot` 테스트(아래)가 헬퍼와 그 목적지의 조립 로봇을 함께
+/// 두어 이 상황을 재현한다.
+///
+/// 한 칸 인접한 칸으로 옮겨도 "그 스테이션에 배달한다"는 의미는 유지된다
+/// — 조립 로봇이 인접 핸드오프 지점에서 물건을 건네받는다고 보면 된다.
+/// 이 칸은 `WAREHOUSE_CELL`, `HELPER_SPAWN_STAGING_CELLS`, 다른
+/// 스테이션의 핸드오프 칸과도 겹치지 않는다(x좌표가 `STATION_XS`로 서로
+/// 다르고, y=1은 `HELPER_SPAWN_STAGING_CELLS`의 `(1,1)`/`(7,1)`과도 x가
+/// 다르다).
+fn station_handoff_cell(station_index: u8) -> CellId {
+    (STATION_XS[station_index as usize], STATION_ROBOT_ROW - 1)
 }
 
 #[derive(Debug, Clone)]
@@ -440,7 +516,7 @@ fn plan_helper(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, tick_co
     };
 
     let destination = match task {
-        HelperTask::RestockStation { station_index } => station_robot_cell(station_index),
+        HelperTask::RestockStation { station_index } => station_handoff_cell(station_index),
         HelperTask::DeliverFrame => (BELT_START_X, BELT_ROW),
     };
 
@@ -457,7 +533,20 @@ fn plan_helper(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, tick_co
             next.path.clear();
             next.ticks_until_repath = 0;
         }
-        return advance_along_path(grid, next, occupied, tick_count);
+        next = advance_along_path(grid, next, occupied, tick_count);
+        if next.pos != target {
+            return next; // 아직 도착 전 — 다음 틱에 계속 이동
+        }
+        // 이번 틱에 막 도착했다 — 곧바로 아래에서 카운트다운을 시작한다.
+        // "도착"과 "카운트다운 시작" 사이에 아무 일도 안 하는 틱을 끼우면
+        // (즉 여기서 그냥 return next 했다면) work_ticks_remaining이 여전히
+        // 0인 채로 pos == target인 상태가 한 틱 존재하게 되는데,
+        // run_helper_logistics의 드롭 완료 판정(carrying &&
+        // work_ticks_remaining == 0 && pos == destination)이 "막 도착함"과
+        // "카운트다운이 다 끝남"을 구분하지 못해 그 틱에 곧바로 드롭을
+        // 완료시켜 버린다 — HELPER_DROP_TICKS 카운트다운 전체가 건너뛰어짐
+        // (실측: mutation test로 재현 — 도착까지 걸린 이동 틱 수만으로
+        // 완료되고 HELPER_DROP_TICKS만큼 더 걸리지 않는 것을 확인함).
     }
 
     next.work_ticks_remaining = if next.carrying { HELPER_DROP_TICKS } else { HELPER_PICKUP_TICKS };
@@ -467,6 +556,11 @@ fn plan_helper(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, tick_co
     next
 }
 
+/// 헬퍼가 목표(`next.goal`)를 향해 경로를 따라 한 칸 전진한다. 순찰
+/// 전용이던 `PATROL_MOVE_INTERVAL_TICKS` 지연은 여기서 넣지 않는다 —
+/// 헬퍼는 매 틱 이동해도 무방하다(의도적 차이, 오래된 순찰 로직의
+/// 흔적이 아님). `tick_count` 파라미터는 인터페이스 일관성을 위해
+/// 남겨두되 이 함수 안에서는 쓰이지 않는다.
 fn advance_along_path(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, _tick_count: u64) -> Robot {
     if next.path.is_empty() || next.ticks_until_repath == 0 {
         let mut blocked = occupied.clone();
@@ -621,7 +715,7 @@ fn plan_products(products: &[Product], stations: &[Station]) -> (Vec<Product>, V
     // 칸에 머무는 모습은 렌더링되지 않는다(설계문서 §5-3) — 도착하는
     // 순간 제거된다. 완료 감지(생산량 집계)는 sim_core 밖(main.rs)에서
     // "이전 틱엔 있었는데 이번 틱엔 없어진 제품 id"로 한다(기존
-    // `detect_completed_placements`와 같은 패턴 — Task 6에서 배선).
+    // `detect_completed_assemblies`와 같은 패턴).
     let remaining: Vec<Product> = updated.into_iter().filter(|p| p.pos.0 < BELT_END_X).collect();
 
     (remaining, stations)
@@ -662,15 +756,27 @@ fn run_helper_logistics(
         pending.push(HelperTask::DeliverFrame);
     }
 
-    // (2) 노는 헬퍼에게 배정 — 먼저 발생한 요청(큐 맨 앞)부터.
-    for robot in robots.iter_mut() {
-        if robot.role != RobotRole::Helper || robot.helper_assignment.is_some() {
-            continue;
-        }
+    // (2) 노는 헬퍼에게 배정 — 먼저 발생한 요청(큐 맨 앞)부터. 배정 순서는
+    // `robots` Vec 순서가 아니라 robot_id 오름차순으로 명시적으로 고정한다
+    // (`resolve_intents`가 `intent.mover_id`로 명시적 타이브레이크하는 것과
+    // 같은 이유) — 오늘은 `game_state::set_robot_count`가 항상 커지는 id를
+    // 끝에 append하고 줄어들 때도 최댓값 id를 제거해서 Vec 순서가 id
+    // 오름차순과 우연히 일치하지만, 그 불변식은 이 함수 밖에 있고 여기서
+    // 재확인할 방법이 없다 — Vec 순서에 그냥 기대면 나중에 그 불변식이
+    // 깨지는 순간(혹은 이 파일의 테스트처럼 `robots.push`로 순서를 직접
+    // 뒤섞는 호출부) 배정이 비결정적으로 보이게 된다.
+    let mut idle_helper_indices: Vec<usize> = robots
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.role == RobotRole::Helper && r.helper_assignment.is_none())
+        .map(|(index, _)| index)
+        .collect();
+    idle_helper_indices.sort_by_key(|&index| robots[index].id);
+    for index in idle_helper_indices {
         if pending.is_empty() {
             break;
         }
-        robot.helper_assignment = Some(pending.remove(0));
+        robots[index].helper_assignment = Some(pending.remove(0));
     }
 
     // (3) 드롭 완료 반영 — work_ticks_remaining이 막 0이 된(carrying=true였던)
@@ -681,7 +787,7 @@ fn run_helper_logistics(
         }
         let Some(task) = robot.helper_assignment else { continue };
         let at_destination = match task {
-            HelperTask::RestockStation { station_index } => robot.pos == station_robot_cell(station_index),
+            HelperTask::RestockStation { station_index } => robot.pos == station_handoff_cell(station_index),
             HelperTask::DeliverFrame => robot.pos == line_start,
         };
         if !at_destination {
@@ -933,6 +1039,11 @@ mod tests {
 
         state = tick(&state, true);
         assert_eq!(state.products[0].stage, 1, "정확히 ASSEMBLY_TICKS번째 틱에 stage가 올라야 한다");
+        assert_eq!(
+            state.products[0].pos,
+            (station_x + 1, BELT_ROW),
+            "조립이 끝나 stage가 오른 바로 그 틱에 제품이 한 칸 전진해야 한다(같은 틱 내 즉시 이동)"
+        );
     }
 
     #[test]
@@ -983,6 +1094,31 @@ mod tests {
     }
 
     #[test]
+    fn lower_id_wins_when_two_products_target_the_same_cell() {
+        // 정상적인 벨트 흐름에서는 제품 위치가 항상 서로 달라(1차선이라
+        // 서로 다른 위치의 제품은 절대 같은 칸을 노릴 수 없다) 이 상황이
+        // 자연스럽게 발생하지 않는다 — 그래도 `plan_products`가 로봇과
+        // 공유하는 `resolve_intents`의 id 타이브레이크를 실제로 올바르게
+        // 호출/적용하는지는 직접 검증해야 한다(설계문서 §7). 뮤테이션
+        // 테스트로 실측: 이 테스트를 추가하기 전에는 `resolve_intents`의
+        // 타이브레이크 방향(`intent.mover_id < *winner`)을 반대로 뒤집어도
+        // (높은 id가 이기게 바꿔도) 기존 테스트가 단 하나도 실패하지
+        // 않았다 — 이 태스크 시점엔 로봇이 전혀 움직이지 않고(조립 로봇은
+        // 고정, 헬퍼는 Task 3 전까지 정지) 벨트는 1차선이라 제품끼리도
+        // 자연 충돌이 없기 때문이다. 그래서 의도적으로 두 제품을 같은
+        // 칸에 겹쳐 두고(비정상 상태) `resolve_intents` 경로를 직접
+        // 노출시킨다.
+        let mut state = state_with_products(vec![Product::new(2, (5, BELT_ROW)), Product::new(1, (5, BELT_ROW))]);
+
+        state = tick(&state, true);
+
+        let winner = state.products.iter().find(|p| p.pos == (6, BELT_ROW)).expect("정확히 한 제품만 전진해야 한다");
+        assert_eq!(winner.id, 1, "낮은 id가 이겨야 한다");
+        let loser = state.products.iter().find(|p| p.id == 2).unwrap();
+        assert_eq!(loser.pos, (5, BELT_ROW), "높은 id는 원래 칸에 남아야 한다");
+    }
+
+    #[test]
     fn product_completing_the_final_station_and_reaching_the_belt_end_is_removed() {
         let mut state = state_with_products(vec![{
             let mut p = Product::new(1, (BELT_END_X - 1, BELT_ROW));
@@ -1021,105 +1157,33 @@ mod tests {
     }
 
     #[test]
-    fn assembly_robot_task_is_picking_while_its_station_has_a_product_mid_assembly() {
-        // 코드 리뷰(뮤테이션 테스트)에서 지적된 커버리지 공백: plan_robot의
-        // Assembly 분기가 `active_stations`를 무시하고 `next.task = Task::Idle`을
-        // 하드코딩해도 기존 테스트가 전부 통과했다 — 이 테스트가 그 회귀를
-        // 잡는다. `active_stations`는 tick() 시작 시점(이 틱이 시작되기 전)
-        // 제품 스냅샷에서 계산되므로, product를 미리 조립 카운트다운 중인
-        // 상태로 스테이션 벨트 칸에 세워두면 같은 틱에 바로 반영된다.
-        let mut robot = Robot::new(1, (STATION_XS[0], STATION_ROBOT_ROW), (0, 0));
-        robot.role = RobotRole::Assembly { station_index: 0 };
-        let mut product = Product::new(1, (STATION_XS[0], BELT_ROW));
-        product.work_ticks_remaining = 5; // 조립 카운트다운 중
-        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]);
-        state.products = vec![product];
-
-        let next = tick(&state, true);
-
-        assert_eq!(
-            next.robots[0].task,
-            Task::Picking,
-            "담당 스테이션에 조립 카운트다운 중인 제품이 있으면 조립 로봇의 task도 Picking이어야 한다"
-        );
-    }
-
-    #[test]
-    fn assembly_robot_task_is_idle_when_no_product_is_mid_assembly_at_its_station() {
-        let mut robot = Robot::new(1, (STATION_XS[0], STATION_ROBOT_ROW), (0, 0));
-        robot.role = RobotRole::Assembly { station_index: 0 };
-        let state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]); // products는 비어 있음
-
-        let next = tick(&state, true);
-
-        assert_eq!(
-            next.robots[0].task,
-            Task::Idle,
-            "담당 스테이션에 조립 중인 제품이 없으면 조립 로봇의 task는 Idle이어야 한다"
-        );
-    }
-
-    #[test]
-    fn three_product_traffic_jam_produces_no_duplicate_positions() {
-        // 코드 리뷰(뮤테이션 테스트)에서 발견된 실제 버그 클래스에 대한
-        // 회귀 방지 테스트: plan_products의 전진 판정에서 `occupied`(틱
-        // 시작 시점 전체 제품 위치 스냅샷) 검사를 실수로 `blocked`(조립/
-        // 대기 중이라 이번 틱에 스스로 못 움직이는 제품만 담은 집합)로
-        // 바꾸면, "그냥 벨트 위에 서 있을 뿐 조립도 대기도 아닌" 중간
-        // 제품은 blocked에 안 잡히므로 그 뒤 제품이 그 칸으로 잘못
-        // 전진해 들어가 두 제품이 같은 칸을 공유하는 결정성 붕괴가
-        // 일어난다(실제로 뮤테이션 테스트로 재현: [(2,3),(1,3),(1,3)]).
-        // 3제품 연쇄로 재현: 맨 앞=스테이션에서 조립 카운트다운 중(진짜
-        // blocked), 가운데=그냥 벨트 위에서 앞이 막혀 정지할 뿐인 제품
-        // (blocked엔 안 잡히지만 occupied엔 잡혀야 함), 맨 뒤=가운데
-        // 때문에 막혀야 하는 제품.
-        let station_x = STATION_XS[0];
-        let mut state = state_with_products(vec![
-            Product::new(1, (station_x, BELT_ROW)),
-            Product::new(2, (station_x - 1, BELT_ROW)),
-            Product::new(3, (station_x - 2, BELT_ROW)),
-        ]);
-
-        state = tick(&state, true);
-
-        let front = state.products.iter().find(|p| p.id == 1).unwrap().pos;
-        let middle = state.products.iter().find(|p| p.id == 2).unwrap().pos;
-        let back = state.products.iter().find(|p| p.id == 3).unwrap().pos;
-
-        assert_eq!(front, (station_x, BELT_ROW), "맨 앞은 조립을 막 시작해 그대로 있어야 한다");
-        assert_eq!(middle, (station_x - 1, BELT_ROW), "가운데는 앞이 막혀 있으니 그대로 있어야 한다");
-        assert_eq!(back, (station_x - 2, BELT_ROW), "맨 뒤는 가운데한테 막혀 있으니 그대로 있어야 한다");
-
-        let positions: HashSet<CellId> = state.products.iter().map(|p| p.pos).collect();
-        assert_eq!(positions.len(), state.products.len(), "제품들이 같은 칸을 공유하면 안 된다(결정성 불변식)");
-    }
-
-    #[test]
     fn a_depleted_station_gets_exactly_one_restock_request_queued() {
         let mut state = SimState::new(Arc::new(Grid::new(9, 7)), Vec::new());
         state.stations[0].part_inventory = 0;
 
         let next = tick(&state, true);
 
-        // 참고: `SimState::new`는 products를 빈 채로 시작하므로 라인
-        // 시작점도 비어 있다 — 같은 틱에 `DeliverFrame` 요청도 자연히
-        // 큐에 들어간다(§6). 그래서 여기서는 큐 전체 길이가 아니라
-        // `RestockStation { station_index: 0 }` 요청 개수만 센다.
-        let restock_count = |tasks: &[HelperTask]| {
-            tasks.iter().filter(|t| **t == HelperTask::RestockStation { station_index: 0 }).count()
-        };
-
+        // 헬퍼가 한 대도 없으므로 배정될 로봇이 있을 수 없다 — 큐 길이와는
+        // 별개로 확인한다(둘을 하나로 합쳐 세면, 큐에 정확히 1개가 쌓이는
+        // 정상 동작 자체가 이 합계를 0이 아니게 만들어 항상 모순되므로 분리).
         let assigned_count = next
             .robots
             .iter()
             .filter(|r| r.helper_assignment == Some(HelperTask::RestockStation { station_index: 0 }))
             .count();
         assert_eq!(assigned_count, 0, "헬퍼가 한 대도 없으면 요청만 큐에 쌓이고 아무도 배정받지 않는다");
-        assert_eq!(restock_count(&next.pending_helper_tasks), 1, "요청은 정확히 한 번만 큐에 들어가야 한다(중복 방지)");
+        // `pending_helper_tasks.len()` 전체가 아니라 RestockStation{0} 요청
+        // 개수만 센다: `SimState::new`는 제품 없이 시작하므로 라인 시작점도
+        // 비어 있어(설계문서 §5-4) 같은 틱에 `DeliverFrame` 요청도 정당하게
+        // 함께 큐에 들어간다 — 그건 이 테스트가 검증하려는 대상이 아니다.
+        let restock_request_count = |s: &SimState| {
+            s.pending_helper_tasks.iter().filter(|t| **t == HelperTask::RestockStation { station_index: 0 }).count()
+        };
+        assert_eq!(restock_request_count(&next), 1, "요청은 정확히 한 번만 큐에 들어가야 한다(중복 방지)");
 
         let after_another_tick = tick(&next, true);
         assert_eq!(
-            restock_count(&after_another_tick.pending_helper_tasks),
+            restock_request_count(&after_another_tick),
             1,
             "재고가 여전히 0이어도 이미 큐에 있는 요청을 또 추가하면 안 된다"
         );
@@ -1154,6 +1218,93 @@ mod tests {
     }
 
     #[test]
+    fn helper_restocks_alongside_its_stationary_assembly_robot() {
+        // 회귀 테스트 — Task 6에서 실제 컴파일된 서버로 실측한 배포 정지
+        // 버그. 위 `helper_restocks_a_station_end_to_end`는 조립 로봇이
+        // 하나도 없는 `SimState`를 만들어서, 목적지 칸이 실제로는 항상
+        // 비어 있는 손쉬운 경우만 검증했다 — 실제 플레이에서는
+        // `GameState::new`가 스테이션마다 조립 로봇 1대를 항상 자동
+        // 스폰하고 그 로봇은 절대 이동하지 않으므로, 이 테스트처럼 헬퍼
+        // "그리고" 그 목적지의 조립 로봇을 함께 넣어야만 진짜 문제(목적지
+        // 칸이 영구히 점유된 상태)를 재현한다. 이 테스트가 고치기 전
+        // 코드(목적지 == `station_robot_cell`)에서 실패하는지는 아래
+        // 뮤테이션 테스트로 별도 확인했다(주석 참고).
+        let mut helper = Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL);
+        helper.role = RobotRole::Helper;
+
+        let mut assembly_robot = Robot::new(2, station_robot_cell(0), station_robot_cell(0));
+        assembly_robot.role = RobotRole::Assembly { station_index: 0 };
+
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![helper, assembly_robot]);
+        state.stations[0].part_inventory = 0;
+
+        let mut restocked = false;
+        for _ in 0..500 {
+            state = tick(&state, true);
+            if state.stations[0].part_inventory == STATION_MAX_INVENTORY {
+                restocked = true;
+                break;
+            }
+        }
+
+        assert!(
+            restocked,
+            "조립 로봇이 목적지 칸에 영구 점유해 있어도 헬퍼가 결국 스테이션 재고를 채워야 한다 \
+             (조립 로봇이 없을 때만 통과하던 예전 테스트로는 이 데드락을 못 잡았다)"
+        );
+        let helper_after = state.robots.iter().find(|r| r.id == 1).unwrap();
+        assert_eq!(helper_after.helper_assignment, None, "임무를 마치면 배정이 풀려야 한다");
+        assert!(!helper_after.carrying);
+        // 조립 로봇은 시나리오 내내 정말 그 자리에 고정돼 있었는지도 확인
+        // — 그렇지 않다면 이 테스트가 원래 재현하려던 "조립 로봇이 목적지를
+        // 영구 점거"라는 조건 자체가 성립하지 않는다.
+        let assembly_after = state.robots.iter().find(|r| r.id == 2).unwrap();
+        assert_eq!(assembly_after.pos, station_robot_cell(0));
+    }
+
+    #[test]
+    fn helper_drop_countdown_actually_elapses_after_arriving_and_is_not_skipped() {
+        // 계획서에는 없던 추가 테스트 — 리뷰 중 뮤테이션 테스트로 실제
+        // 버그를 하나 발견해서 그 회귀를 막기 위해 추가했다. 헬퍼가 목적지
+        // 칸에 도착하는 바로 그 틱엔 `work_ticks_remaining`이 (이동 전부터)
+        // 계속 0인 채라(픽업 카운트다운이 이미 끝나 있었으므로), 만약
+        // "도착"과 "카운트다운 시작"을 별개 틱으로 나누면
+        // `run_helper_logistics`의 드롭 완료 판정(carrying &&
+        // work_ticks_remaining == 0 && pos == destination)이 "막 도착함"과
+        // "카운트다운이 다 끝남"을 구분 못 해 `HELPER_DROP_TICKS` 전체를
+        // 건너뛰고 도착 즉시 드롭을 완료시켜 버렸다(실제로 재현: 이동
+        // 거리만큼의 틱 수만에 완료됨). `plan_helper`가 도착 틱에 곧바로
+        // 카운트다운을 시작하도록 고쳐서 고쳤다 — 이 테스트는 그 고정을
+        // 검증한다(총 소요 틱 = 이동 거리 + HELPER_DROP_TICKS 이상이어야
+        // 함).
+        let mut robot = Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL);
+        robot.carrying = true;
+        robot.work_ticks_remaining = 0;
+        robot.helper_assignment = Some(HelperTask::RestockStation { station_index: 0 });
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![robot]);
+        state.stations[0].part_inventory = 0;
+
+        let handoff_cell = station_handoff_cell(0);
+        let manhattan_distance = (WAREHOUSE_CELL.0 - handoff_cell.0).abs() + (WAREHOUSE_CELL.1 - handoff_cell.1).abs();
+
+        let mut ticks_elapsed = 0;
+        loop {
+            state = tick(&state, true);
+            ticks_elapsed += 1;
+            if state.robots[0].helper_assignment.is_none() {
+                break;
+            }
+            if ticks_elapsed > 100 {
+                panic!("never completed");
+            }
+        }
+        assert!(
+            ticks_elapsed >= manhattan_distance as u32 + HELPER_DROP_TICKS,
+            "expected at least travel({manhattan_distance}) + HELPER_DROP_TICKS({HELPER_DROP_TICKS}) ticks, got {ticks_elapsed}"
+        );
+    }
+
+    #[test]
     fn helper_delivers_a_fresh_frame_when_the_line_start_is_empty() {
         let state = SimState::new(Arc::new(Grid::new(9, 7)), vec![Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL)]);
         assert!(state.products.is_empty());
@@ -1180,5 +1331,110 @@ mod tests {
         let next = tick(&state, true);
 
         assert_eq!(next.robots[0].helper_assignment, None);
+    }
+
+    #[test]
+    fn two_simultaneously_depleted_stations_are_each_restocked_by_a_different_idle_helper() {
+        // 기존 헬퍼 테스트 5개는 전부 스테이션 1개 + 헬퍼 최대 1대만
+        // 다뤄서, 여러 스테이션이 같은 틱에 동시에 고갈되고 여러 헬퍼가
+        // 동시에 놀고 있을 때 "각 스테이션이 서로 다른 헬퍼에게 배정돼
+        // 결국 둘 다 채워지는지"는 실측된 적이 없었다(코드 리뷰에서 손으로
+        // 추적한 결과 로직 자체는 맞다고 확인됨 — enqueue 루프가 스테이션
+        // 마다 별개의 `RestockStation{0}`/`RestockStation{1}` 태스크를
+        // 큐에 넣고, FIFO 배정이 서로 다른 헬퍼에게 순서대로 나눠주므로).
+        let mut state = SimState::new(
+            Arc::new(Grid::new(9, 7)),
+            vec![Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL), Robot::new(2, WAREHOUSE_CELL, WAREHOUSE_CELL)],
+        );
+        state.stations[0].part_inventory = 0;
+        state.stations[1].part_inventory = 0;
+        // 스테이션 2는 일부러 그대로 둔다(가득 참) — 배정 로직이 고갈된
+        // 스테이션만 골라내고 멀쩡한 스테이션은 안 건드리는지도 같이 확인.
+        assert_eq!(state.stations[2].part_inventory, STATION_MAX_INVENTORY);
+
+        let next = tick(&state, true);
+
+        let assignment_of = |s: &SimState, id: u32| s.robots.iter().find(|r| r.id == id).unwrap().helper_assignment;
+        assert_eq!(assignment_of(&next, 1), Some(HelperTask::RestockStation { station_index: 0 }));
+        assert_eq!(assignment_of(&next, 2), Some(HelperTask::RestockStation { station_index: 1 }));
+        assert_ne!(
+            assignment_of(&next, 1),
+            assignment_of(&next, 2),
+            "두 헬퍼가 같은 태스크를 놓고 경쟁하면 안 되고 서로 다른 스테이션을 맡아야 한다"
+        );
+
+        let mut state = next;
+        let mut station0_done = false;
+        let mut station1_done = false;
+        for _ in 0..500 {
+            state = tick(&state, true);
+            station0_done |= state.stations[0].part_inventory == STATION_MAX_INVENTORY;
+            station1_done |= state.stations[1].part_inventory == STATION_MAX_INVENTORY;
+            if station0_done && station1_done {
+                break;
+            }
+        }
+        assert!(station0_done, "스테이션 0도 결국 재고가 채워져야 한다");
+        assert!(station1_done, "스테이션 1도 결국 재고가 채워져야 한다");
+        assert_eq!(
+            state.stations[2].part_inventory, STATION_MAX_INVENTORY,
+            "원래부터 가득 차 있던 스테이션 2는 그대로 유지돼야 한다"
+        );
+    }
+
+    #[test]
+    fn multiple_simultaneously_idle_helpers_do_not_permanently_block_a_helper_returning_to_the_warehouse_cell() {
+        // 실제로 있었던 배포 정지 버그의 sim_core 레벨 회귀 테스트
+        // (bisected to commit 6576653). 예전엔 `set_robot_count`의 성장
+        // 분기가 새 헬퍼를 전부 `WAREHOUSE_CELL` 자체에 스폰했다. 유휴
+        // (`helper_assignment == None`) 헬퍼는 `plan_helper`가 절대
+        // 움직이지 않으므로, 헬퍼 수가 동시 대기 작업 수보다 많아지면
+        // 남는 헬퍼들이 `WAREHOUSE_CELL`을 영구 점거했다 — `find_path`는
+        // 목표 칸이 점유돼 있어도 그쪽으로 향하는 경로 자체는 허용하지만
+        // (pathfind.rs 참고), `advance_along_path`의 마지막 한 칸 진입은
+        // `!occupied.contains(&next_cell)`로 막혀서, 실제 픽업을 하러 그
+        // 칸에 도착해야 하는 활성 헬퍼가 도착 직전에서 영원히 멈췄다.
+        //
+        // 지금은 `set_robot_count`가 새 헬퍼를 `HELPER_SPAWN_STAGING_CELLS`
+        // (WAREHOUSE_CELL 자체는 피함)로 분산 스폰한다 — 이 테스트는 그
+        // 스폰 규칙을 그대로 재현해서(id를 배열 길이로 나눈 나머지로
+        // 인덱싱, `set_robot_count`와 완전히 같은 방식) 여러 헬퍼가
+        // 동시에 유휴 상태로 남아 있어도, 실제 배정을 받아 창고까지
+        // 가야 하는 헬퍼가 끝내 도착해서 스테이션을 채우는지 검증한다.
+        //
+        // 뮤테이션 테스트로 실측: 아래 `idle_cell_for`가 `WAREHOUSE_CELL`을
+        // 반환하도록(예전 버그처럼) 일시적으로 바꿔봤더니 이 테스트가
+        // 2000틱 안에 restocked==false로 실패하는 것을 확인했다 — 즉 이
+        // 테스트는 실제로 이 회귀를 잡아낸다(공허한 테스트가 아님).
+        let idle_cell_for = |id: u32| HELPER_SPAWN_STAGING_CELLS[id as usize % HELPER_SPAWN_STAGING_CELLS.len()];
+
+        // "mover" — 창고에서 멀리 떨어진 곳에서 시작하고 id가 가장 낮아
+        // FIFO 배정 1순위(run_helper_logistics의 robot_id 오름차순
+        // 규칙)라서, 아래 고갈된 스테이션의 RestockStation 작업을 반드시
+        // 이 로봇이 받는다 — 그래서 실제로 WAREHOUSE_CELL까지 이동해야
+        // 하는 상황이 보장된다.
+        let mut robots = vec![Robot::new(1, (0, 6), (0, 6))];
+        for id in [2u32, 3, 4, 5] {
+            let cell = idle_cell_for(id);
+            robots.push(Robot::new(id, cell, cell));
+        }
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), robots);
+        state.stations[0].part_inventory = 0;
+
+        let mut restocked = false;
+        for _ in 0..2000 {
+            state = tick(&state, true);
+            if state.stations[0].part_inventory == STATION_MAX_INVENTORY {
+                restocked = true;
+                break;
+            }
+        }
+
+        assert!(
+            restocked,
+            "여러 헬퍼가 창고 대기 칸들에 동시에 유휴 상태로 남아 있어도, 배정받은 헬퍼가 결국 \
+             WAREHOUSE_CELL까지 도달해 스테이션을 채워야 한다(유휴 헬퍼가 WAREHOUSE_CELL 자체를 \
+             점거해 막는 회귀가 생기면 여기서 영원히 채워지지 않는다)"
+        );
     }
 }
