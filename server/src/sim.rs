@@ -350,6 +350,20 @@ fn station_handoff_cell(station_index: u8) -> CellId {
     (STATION_XS[station_index as usize], STATION_ROBOT_ROW - 1)
 }
 
+/// 벨트가 차지하는 칸 전부(`BELT_START_X..=BELT_END_X`, `BELT_ROW`) —
+/// 헬퍼 경로탐색이 이 칸들을 지름길로 쓰지 못하게 막는 데 쓴다(아래
+/// `advance_along_path` 참고). 오직 `DeliverFrame`의 목적지(라인
+/// 시작점, `(BELT_START_X, BELT_ROW)`)만 벨트 위에 있고 그 외 어떤
+/// 헬퍼 목적지도 벨트 칸이 아니므로(`WAREHOUSE_CELL`/
+/// `HELPER_SPAWN_STAGING_CELLS`/`station_handoff_cell` 전부 y=0 또는
+/// y=1), 벨트를 통째로 막아도 실제로 도달해야 하는 칸을 못 가는 경우는
+/// `DeliverFrame`뿐이다 — `find_path`가 목표 칸 자체는 `blocked`여도
+/// 도달을 막지 않으므로(`pathfind.rs` 문서 참고) 그 경우는 예외 없이도
+/// 이미 안전하다.
+fn belt_cells() -> impl Iterator<Item = CellId> {
+    (BELT_START_X..=BELT_END_X).map(|x| (x, BELT_ROW))
+}
+
 #[derive(Debug, Clone)]
 pub struct SimState {
     pub grid: Arc<Grid>,
@@ -565,6 +579,12 @@ fn advance_along_path(grid: &Grid, mut next: Robot, occupied: &HashSet<CellId>, 
     if next.path.is_empty() || next.ticks_until_repath == 0 {
         let mut blocked = occupied.clone();
         blocked.remove(&next.pos);
+        // 벨트를 지름길로 쓰지 못하게 막는다(실사용 피드백으로 발견된
+        // 문제 — 헬퍼가 창고<->스테이션을 오가며 벨트 위를 그냥 걸어서
+        // 지나갔다). `find_path`는 목표 칸 자체는 blocked여도 도달을 막지
+        // 않으므로(`belt_cells()` 문서 참고), `DeliverFrame`이 실제로
+        // 벨트 위(라인 시작점)로 가야 할 때는 그대로 통과한다.
+        blocked.extend(belt_cells());
         next.path = find_path(grid, next.pos, next.goal, &blocked).unwrap_or_default();
         next.ticks_until_repath = REPATH_INTERVAL;
     } else {
@@ -1319,6 +1339,35 @@ mod tests {
             }
         }
         assert!(delivered, "라인 시작점이 비어있으면 헬퍼가 결국 새 프레임을 가져다 놓아야 한다");
+    }
+
+    #[test]
+    fn helper_never_walks_across_the_belt_except_to_reach_the_line_start_delivery_cell() {
+        // 실사용 피드백으로 발견된 버그의 회귀 테스트: 헬퍼가 창고<->라인
+        // 시작점을 오가며 벨트(y=BELT_ROW) 위 여러 칸을 지름길 복도처럼
+        // 걸어서 지나갔다(경로탐색이 벨트 칸을 장애물로 취급하지 않았기
+        // 때문). 유일하게 허용되는 예외는 실제 배달 목적지인
+        // (BELT_START_X, BELT_ROW) 그 자체뿐이다.
+        let mut state = SimState::new(Arc::new(Grid::new(9, 7)), vec![Robot::new(1, WAREHOUSE_CELL, WAREHOUSE_CELL)]);
+        let mut delivered = false;
+        for _ in 0..500 {
+            state = tick(&state, true);
+            for robot in state.robots.iter().filter(|r| r.role == RobotRole::Helper) {
+                if robot.pos.1 == BELT_ROW {
+                    assert_eq!(
+                        robot.pos,
+                        (BELT_START_X, BELT_ROW),
+                        "헬퍼가 라인 시작점이 아닌 벨트 칸을 지나갔다: {:?}",
+                        robot.pos
+                    );
+                }
+            }
+            if state.products.iter().any(|p| p.pos == (BELT_START_X, BELT_ROW) && p.stage == 0) {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "테스트 전제 확인 — 프레임 배달까지는 재현돼야 한다");
     }
 
     #[test]
